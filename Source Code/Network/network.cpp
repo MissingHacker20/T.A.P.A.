@@ -1,4 +1,3 @@
-// network.cpp
 #include "network.h"
 #include <algorithm>
 #include <cstdint>

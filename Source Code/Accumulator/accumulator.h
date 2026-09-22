@@ -33,9 +33,9 @@ struct Accumulator {
     const std::array<AccumulatorValue, AccumulatorSize>& get_data() const { return data; }
 
     // Full reconstruction from feature set (reference)
-    void reconstruct(const Features::FeatureSet& fs, /* weights */);
+    void reconstruct(const Features::FeatureSet& fs);
     // Incremental update given added/removed features
-    void update_incremental(const Features::FeatureSet& added, const Features::FeatureSet& removed, /* weights */);
+    void update_incremental(const Features::FeatureSet& added, const Features::FeatureSet& removed);
 };
 
 } // namespace Accumulator
