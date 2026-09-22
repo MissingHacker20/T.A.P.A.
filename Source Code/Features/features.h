@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstddef>
+#include <bit>
 #include <cstdint>
 #include <functional>
 
@@ -12,6 +13,10 @@ constexpr int ColorCount = 2;
 
 using Bitboard = std::uint64_t;
 using Square = std::uint8_t;
+
+constexpr bool is_valid_square(Square square) noexcept {
+    return square < BoardSquares;
+}
 
 enum class Color : std::uint8_t { White = 0, Black = 1 };
 enum class PieceType : std::uint8_t { Knight = 0, Bishop, Rook, Queen };
@@ -51,8 +56,7 @@ struct King {
     friend constexpr bool operator==(const King&, const King&) = default;
 };
 
-// A position view used by the feature generator. MissingPawn can populate this
-// view without making Features depend on the engine's internal board classes.
+// Public adapter until MissingPawn's native Position API is finalized.
 struct Position {
     Bitboard pawns[ColorCount]{};
     Bitboard pieces[ColorCount][4]{}; // Knight, Bishop, Rook, Queen
@@ -82,6 +86,7 @@ struct FeatureSet {
     void clear() noexcept { size = 0; }
 };
 
+bool is_valid_position(const Position& position) noexcept;
 PawnStructureKey pawn_structure_key(const Position& position) noexcept;
 void generate_features(const Position& position, FeatureSet& out);
 

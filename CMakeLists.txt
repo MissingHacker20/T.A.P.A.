@@ -30,9 +30,11 @@ target_compile_options(tapa_nnue PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra;-Wpedantic>
 )
 
-option(TAPA_BUILD_TESTS "Build the TAPA test sources" OFF)
+include(CTest)
+option(TAPA_BUILD_TESTS "Build and register the TAPA tests" ${BUILD_TESTING})
 if(TAPA_BUILD_TESTS)
-    add_library(tapa_tests OBJECT "Source Code/Tests/tests.cpp")
+    add_executable(tapa_tests "Source Code/Tests/tests.cpp")
     target_link_libraries(tapa_tests PRIVATE tapa_nnue)
     target_include_directories(tapa_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Source Code/Tests")
+    add_test(NAME tapa_features_tests COMMAND tapa_tests)
 endif()

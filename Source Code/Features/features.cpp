@@ -24,6 +24,16 @@ bool FeatureSet::remove(const Feature& feature) {
     return false;
 }
 
+bool is_valid_position(const Position& position) noexcept {
+    for (int color = 0; color < ColorCount; ++color) {
+        if (!is_valid_square(position.kings[color])) return false;
+        for (int type = 0; type < 4; ++type) {
+            if ((position.pieces[color][type] & position.pawns[color]) != 0) return false;
+        }
+    }
+    return true;
+}
+
 PawnStructureKey pawn_structure_key(const Position& position) noexcept {
     return {position.pawns[static_cast<int>(Color::White)],
             position.pawns[static_cast<int>(Color::Black)]};
@@ -41,7 +51,7 @@ void generate_features(const Position& position, FeatureSet& out) {
             for (int type = 0; type < 4; ++type) {
                 Bitboard occupied = position.pieces[piece_color][type];
                 while (occupied != 0) {
-                    const Square square = static_cast<Square>(__builtin_ctzll(occupied));
+                    const Square square = static_cast<Square>(std::countr_zero(occupied));
                     occupied &= occupied - 1;
                     out.add({pawns, {color, static_cast<PieceType>(type), square}, king, side});
                 }

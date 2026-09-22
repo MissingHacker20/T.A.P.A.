@@ -1,1 +1,20 @@
+# CMake build trees
+/build/
+/cmake-build-*/
 TODO.md
+
+# Compiled artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+# IDE files
+.vs/
+.vscode/
+.idea/
+
+# Local benchmark output
+/benchmarks/results/
