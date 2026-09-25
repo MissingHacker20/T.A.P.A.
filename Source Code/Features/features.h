@@ -1,116 +1,71 @@
+// features.h
 #pragma once
+
 #include <array>
-#include <cstddef>
-#include <bit>
 #include <cstdint>
-#include <functional>
+#include <cstddef>
 
 namespace TAPA {
 namespace Features {
 
 constexpr int BoardSquares = 64;
-constexpr int ColorCount = 2;
+constexpr int PieceColors = 2; // White=0, Black=1
+constexpr int PieceTypes = 6; // Pawn, Knight, Bishop, Rook, Queen, King
+constexpr int KingSquares = BoardSquares;
 
-using Bitboard = std::uint64_t;
-using Square = std::uint8_t;
-
-constexpr bool is_valid_square(Square square) noexcept {
-    return square < BoardSquares;
+// Index encoding: ((king_square * PieceColors + piece_color) * PieceTypes + piece_type) * BoardSquares + piece_square
+inline std::size_t encode_index(int king_square, int piece_color, int piece_type, int piece_square) {
+    return (((king_square * PieceColors + piece_color)
+            * PieceTypes + piece_type)
+            * BoardSquares) + piece_square;
 }
 
-enum class Color : std::uint8_t { White = 0, Black = 1 };
-enum class PieceType : std::uint8_t { Knight = 0, Bishop, Rook, Queen };
-
-constexpr Color opposite(Color color) {
-    return color == Color::White ? Color::Black : Color::White;
-}
-
-struct PawnStructureKey {
-    Bitboard white = 0;
-    Bitboard black = 0;
-
-    friend constexpr bool operator==(const PawnStructureKey&, const PawnStructureKey&) = default;
-};
-
-struct PawnStructureKeyHash {
-    std::size_t operator()(const PawnStructureKey& key) const noexcept {
-        // The two bitboards are deliberately kept distinguishable.
-        const std::size_t h1 = std::hash<Bitboard>{}(key.white);
-        const std::size_t h2 = std::hash<Bitboard>{}(key.black);
-        return h1 ^ (h2 + static_cast<std::size_t>(0x9e3779b9) + (h1 << 6) + (h1 >> 2));
-    }
-};
-
-struct Piece {
-    Color color = Color::White;
-    PieceType type = PieceType::Knight;
-    Square square = 0;
-
-    friend constexpr bool operator==(const Piece&, const Piece&) = default;
-};
-
-struct King {
-    Color color = Color::White;
-    Square square = 0;
-
-    friend constexpr bool operator==(const King&, const King&) = default;
-};
-
-// Public adapter until MissingPawn's native Position API is finalized.
-struct Position {
-    Bitboard pawns[ColorCount]{};
-    Bitboard pieces[ColorCount][4]{}; // Knight, Bishop, Rook, Queen
-    Square kings[ColorCount]{};
-};
-
+// Feature representation
 struct Feature {
-    PawnStructureKey pawn_structure;
-    Piece piece;
-    Square king_square = 0; // king belonging to perspective
-    Color perspective = Color::White;
-
-    friend constexpr bool operator==(const Feature&, const Feature&) = default;
+    std::size_t index; // computed via encode_index
+    int value;         // typically 1
 };
 
-// A legal chess position has at most 15 non-king, non-pawn pieces per side
-// (seven original pieces plus eight promoted pieces): 30 features total.
-constexpr int MaxPiecesPerSide = 15;
-constexpr int MaxFeatures = ColorCount * MaxPiecesPerSide;
-
+// FeatureSet: stores active features without dynamic allocation in typical case
+constexpr int MaxFeatures = 512; // conservative upper bound
 struct FeatureSet {
     std::array<Feature, MaxFeatures> features{};
     std::size_t size = 0;
 
-    bool add(const Feature& feature);
-    bool remove(const Feature& feature);
-    void clear() noexcept { size = 0; }
+    bool add(const Feature& f);
+    bool remove(std::size_t index); // remove by index
+    void clear() { size = 0; }
 };
 
-bool is_valid_position(const Position& position) noexcept;
-PawnStructureKey pawn_structure_key(const Position& position) noexcept;
-void generate_features(const Position& position, FeatureSet& out);
+// Position representation (simplified for demonstration)
+enum class PieceType : uint8_t { Pawn = 0, Knight, Bishop, Rook, Queen, King };
+enum class PieceColor : uint8_t { White = 0, Black = 1 };
 
+struct Piece {
+    PieceType type;
+    PieceColor color;
+    int square; // 0-63
+};
+
+struct Position {
+    // For simplicity, we store a list of pieces; in real engine this would be bitboards.
+    Piece pieces[32]; // max 32 pieces
+    std::size_t num_pieces = 0;
+
+    // Helper to get king square for a color
+    int king_square(PieceColor color) const;
+};
+
+// Generate full feature set from a position
+void generate_features(const Position& pos, FeatureSet& out);
+
+// Compute feature delta between two positions (for incremental update)
 struct FeatureDelta {
     FeatureSet added;
     FeatureSet removed;
-    PawnStructureKey old_pawn_structure;
-    PawnStructureKey new_pawn_structure;
-
-    bool pawn_structure_changed() const noexcept {
-        return !(old_pawn_structure == new_pawn_structure);
-    }
 };
 
-// Computes the piece/king delta and exposes pawn-key changes separately for the
-// Pawn Accumulator. The caller may pass a new Position after making a move.
 FeatureDelta update_features(const Position& previous, const Position& current);
 
 } // namespace Features
 } // namespace TAPA
-namespace std {
-template<> struct hash<TAPA::Features::PawnStructureKey> {
-    std::size_t operator()(const TAPA::Features::PawnStructureKey& key) const noexcept {
-        return TAPA::Features::PawnStructureKeyHash{}(key);
-    }
-};
-}

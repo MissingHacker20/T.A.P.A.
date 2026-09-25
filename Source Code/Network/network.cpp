@@ -1,57 +1,64 @@
+// network.cpp
 #include "network.h"
-#include <algorithm>
 #include <cstdint>
 
 namespace TAPA {
 namespace Network {
 
-template<int InputSize, int OutputSize>
-void Layer<InputSize, OutputSize>::forward(const std::array<int32_t, InputSize>& in,
-                                          std::array<int32_t, OutputSize>& out) const {
-    // Initialize output with bias
-    for (int j = 0; j < OutputSize; ++j) {
-        int32_t sum = bias[j];
-        for (int i = 0; i < InputSize; ++i) {
-            sum += in[i] * weights[i][j];
+Network::Network() {
+    // Initialize weights and biases with simple fixed values for testing.
+    // We'll set weights to 1 and biases to 0.
+    // Layer 1
+    for (int i = 0; i < InputSize; ++i) {
+        for (int j = 0; j < HiddenSize1; ++j) {
+            layer1.weights[i][j] = 1;
         }
-        out[j] = clipped_relu(sum, 127); // limit from outer class; need access
-        // For simplicity, we'll use a global limit; better to pass limit as parameter.
+    }
+    for (int j = 0; j < HiddenSize1; ++j) {
+        layer1.bias[j] = 0;
+    }
+    // Layer 2
+    for (int i = 0; i < HiddenSize1; ++i) {
+        for (int j = 0; j < HiddenSize2; ++j) {
+            layer2.weights[i][j] = 1;
+        }
+    }
+    for (int j = 0; j < HiddenSize2; ++j) {
+        layer2.bias[j] = 0;
+    }
+    // Output layer
+    for (int i = 0; i < HiddenSize2; ++i) {
+        for (int j = 0; j < OutputSize; ++j) {
+            output_layer.weights[i][j] = 1;
+        }
+    }
+    for (int j = 0; j < OutputSize; ++j) {
+        output_layer.bias[j] = 0;
     }
 }
 
-// Since we cannot access outer class limit here, we'll implement forward in Network class.
-
-Network::Network() {
-    // Initialize weights and biases to zero (placeholder)
-    // In real implementation, load from model.
-}
-
-int32_t Network::forward_pass(const Accumulator::Accumulator& acc_white,
-                              const Accumulator::Accumulator& acc_black) {
+int32_t Network::forward_pass(const TAPA::Accumulator::Accumulator& acc_white,
+                              const TAPA::Accumulator::Accumulator& acc_black) {
     // Concatenate accumulators
     std::array<int32_t, InputSize> input{};
     const auto& white_data = acc_white.get_data();
     const auto& black_data = acc_black.get_data();
-    for (int i = 0; i < Accumulator::NeuronCount; ++i) {
+    for (int i = 0; i < AccumulatorNeuronCount; ++i) {
         input[i] = white_data[i];
-        input[i + Accumulator::NeuronCount] = black_data[i];
+        input[i + AccumulatorNeuronCount] = black_data[i];
     }
 
     std::array<int32_t, HiddenSize1> hidden1{};
-    layer1.forward(input, hidden1);
+    layer1.forward(input, hidden1, activation_limit);
 
     std::array<int32_t, HiddenSize2> hidden2{};
-    layer2.forward(hidden1, hidden2);
+    layer2.forward(hidden1, hidden2, activation_limit);
 
     std::array<int32_t, OutputSize> output{};
-    output_layer.forward(hidden2, output);
+    output_layer.forward(hidden2, output, activation_limit);
 
     return output[0];
 }
-
-// Need to implement Layer::forward with limit; we'll redo with limit parameter.
-// For simplicity, we'll define a non-template version or adjust.
-// Given time, we'll keep as is and note that limit is hardcoded.
 
 } // namespace Network
 } // namespace TAPA
