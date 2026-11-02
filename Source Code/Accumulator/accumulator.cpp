@@ -5,14 +5,16 @@ namespace TAPA {
 namespace Accumulator {
 
 void Accumulator::add_feature(const Features::Feature& f, const AccumulatorValue* weights) {
-    for (int i = 0; i < NeuronCount; ++i) {
-        data[i] += weights[i];
+    if (weights == nullptr) return;
+    for (std::size_t i = 0; i < NeuronCount; ++i) {
+        data[i] += static_cast<AccumulatorValue>(f.value) * weights[i];
     }
 }
 
 void Accumulator::remove_feature(const Features::Feature& f, const AccumulatorValue* weights) {
-    for (int i = 0; i < NeuronCount; ++i) {
-        data[i] -= weights[i];
+    if (weights == nullptr) return;
+    for (std::size_t i = 0; i < NeuronCount; ++i) {
+        data[i] -= static_cast<AccumulatorValue>(f.value) * weights[i];
     }
 }
 

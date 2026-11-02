@@ -3,13 +3,16 @@
 
 #include <array>
 #include <cstdint>
+#include <cstddef>
 #include "../Features/features.h"
 
 namespace TAPA {
 namespace Accumulator {
 
-constexpr int NeuronCount = 256; // should match first layer size
-using AccumulatorValue = int32_t;
+// Architectural embedding width v3; also stored in the model header so a
+// mismatching model is rejected at load time.
+constexpr std::size_t NeuronCount = 256;
+using AccumulatorValue = std::int32_t;
 
 struct Accumulator {
     std::array<AccumulatorValue, NeuronCount> data{};
@@ -34,7 +37,9 @@ struct Accumulator {
                             const AccumulatorValue* weights);
 
     // Get reference to accumulator data for network
-    const std::array<AccumulatorValue, NeuronCount>& get_data() const { return data; }
+    const std::array<AccumulatorValue, NeuronCount>& get_data() const noexcept { return data; }
+    std::array<AccumulatorValue, NeuronCount>& get_data() noexcept { return data; }
+    void reset(AccumulatorValue bias_value = 0) noexcept { initialize(bias_value); }
 };
 
 } // namespace Accumulator

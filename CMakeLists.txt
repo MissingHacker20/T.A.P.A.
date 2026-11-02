@@ -9,6 +9,10 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(TAPA_SOURCES
     "Source Code/Features/features.cpp"
     "Source Code/Accumulator/accumulator.cpp"
+    "Source Code/Accumulator/pawn_accumulator.cpp"
+    "Source Code/Accumulator/piece_accumulator.cpp"
+    "Source Code/Features/move.cpp"
+    "Source Code/Model/model.cpp"
     "Source Code/Network/network.cpp"
     "Source Code/NNUE/nnue.cpp"
 )
@@ -30,11 +34,20 @@ target_compile_options(tapa_nnue PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall;-Wextra;-Wpedantic>
 )
 
+find_package(Threads REQUIRED)
+target_link_libraries(tapa_nnue PUBLIC Threads::Threads)
+
 include(CTest)
 option(TAPA_BUILD_TESTS "Build and register the TAPA tests" ${BUILD_TESTING})
 if(TAPA_BUILD_TESTS)
-    add_executable(tapa_tests "Source Code/Tests/tests.cpp")
+    add_executable(tapa_tests "Tests/tests.cpp")
     target_link_libraries(tapa_tests PRIVATE tapa_nnue)
-    target_include_directories(tapa_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Source Code/Tests")
+    target_include_directories(tapa_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/Tests")
     add_test(NAME tapa_features_tests COMMAND tapa_tests)
+endif()
+
+option(TAPA_BUILD_BENCHMARKS "Build T.A.P.A. performance benchmarks" OFF)
+if(TAPA_BUILD_BENCHMARKS)
+    add_executable(tapa_benchmarks "Tests/benchmarks.cpp")
+    target_link_libraries(tapa_benchmarks PRIVATE tapa_nnue)
 endif()

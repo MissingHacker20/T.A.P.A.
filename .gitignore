@@ -15,6 +15,7 @@ TODO.md
 .vs/
 .vscode/
 .idea/
+/docs/
 
 # Local benchmark output
 /benchmarks/results/
