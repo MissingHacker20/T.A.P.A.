@@ -10,6 +10,7 @@ namespace TAPA::Accumulator
     constexpr std::size_t PawnNeuronCount = 256;
     using PawnAccumulatorValue = std::int32_t;
     using PawnWeight = std::int16_t;
+    constexpr std::size_t MaxPawnContributions = 64;
 
     struct PawnWeights
     {
@@ -51,8 +52,10 @@ namespace TAPA::Accumulator
             clear();
         }
         const PawnAccumulator &get(Features::PawnStructureKey key) noexcept;
+        void insert(Features::PawnStructureKey key, const PawnAccumulator &accumulator) noexcept;
         const PawnAccumulator *find(Features::PawnStructureKey key) const noexcept;
         const PawnAccumulator *touch(Features::PawnStructureKey key) noexcept;
+        std::size_t insertions() const noexcept { return insertions_; }
         void clear() noexcept;
         PawnCacheStats stats() const noexcept { return stats_; }
         static constexpr std::size_t capacity() noexcept { return Capacity; }
@@ -70,6 +73,7 @@ namespace TAPA::Accumulator
         std::array<Entry, Capacity> entries_{};
         std::uint64_t clock_ = 0;
         PawnCacheStats stats_{};
+        std::size_t insertions_ = 0;
     };
 
 } // namespace TAPA::Accumulator

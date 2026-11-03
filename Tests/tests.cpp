@@ -13,6 +13,10 @@
 #include <fstream>
 #include <random>
 #include <iostream>
+#include <limits>
+#include <memory>
+#include <thread>
+#include <vector>
 
 namespace TAPA::Tests
 {
@@ -175,6 +179,35 @@ namespace TAPA::Tests
         bool accumulator_tests()
         {
             using Accumulator = TAPA::Accumulator::Accumulator;
+            std::array<std::int32_t, TAPA::Accumulator::NeuronCount> extreme_weights{};
+            extreme_weights.fill(std::numeric_limits<std::int32_t>::max());
+            Accumulator extreme;
+            extreme.initialize(std::numeric_limits<std::int32_t>::max());
+            Feature positive{0, 1, PieceColor::White};
+            Feature negative{1, -1, PieceColor::White};
+            Feature invalid_coefficient{2, 2, PieceColor::White};
+            extreme.add_feature(invalid_coefficient, extreme_weights.data());
+            if (extreme.get_data()[0] != std::numeric_limits<std::int32_t>::max()) return false;
+            extreme.add_feature(positive, extreme_weights.data());
+            if (extreme.get_data()[0] != std::numeric_limits<std::int32_t>::max()) return false;
+            extreme.initialize(std::numeric_limits<std::int32_t>::min());
+            extreme.add_feature(negative, extreme_weights.data());
+            if (extreme.get_data()[0] != std::numeric_limits<std::int32_t>::min()) return false;
+            FeatureSet full_extremes;
+            full_extremes.add(positive);
+            full_extremes.add(negative);
+            extreme.initialize(0);
+            extreme.reconstruct(full_extremes, extreme_weights.data());
+            if (extreme.get_data()[0] != 0) return false;
+            Accumulator incremental_extremes;
+            incremental_extremes.initialize(0);
+            FeatureSet first_add, second_add;
+            first_add.add(positive);
+            second_add.add(negative);
+            incremental_extremes.update_incremental(first_add, {}, extreme_weights.data());
+            incremental_extremes.update_incremental(second_add, {}, extreme_weights.data());
+            if (extreme.get_data() != incremental_extremes.get_data()) return false;
+
             Accumulator full;
             Accumulator incremental;
             full.initialize(7);
@@ -215,6 +248,14 @@ namespace TAPA::Tests
             TAPA::Accumulator::PawnAccumulatorCache cache(weights);
             cache.get(new_key);
             if (cache.touch(new_key) == nullptr || cache.stats().hits != 1 || cache.stats().misses != 1) return false;
+            const auto cached_accumulator = cache.get(new_key);
+            const auto insertion_count = cache.insertions();
+            cache.insert(old_key, incremental);
+            if (cache.insertions() != insertion_count + 1 || !cache.contains(old_key) ||
+                cache.get(old_key) != full || cached_accumulator != full) return false;
+            const auto old_insertions = cache.insertions();
+            cache.insert(old_key, full);
+            if (cache.insertions() != old_insertions + 1) return false;
             for (std::size_t i = 0; i < TAPA::Accumulator::PawnAccumulatorCache::Capacity; ++i)
                 cache.get(static_cast<PawnStructureKey>(i + 1000));
             return cache.find(new_key) == nullptr;
@@ -222,30 +263,86 @@ namespace TAPA::Tests
 
         bool model_tests()
         {
+            auto fail = [](int step) { std::printf("model_tests: failed at step %d\n", step); return false; };
+            TAPA::Model::Model malformed;
+            malformed.piece_weights.feature_weights.clear();
+            std::string malformed_error;
+            if (TAPA::Model::save("tapa_invalid_piece_model.bin", malformed, &malformed_error)) return fail(1);
+            NNUE reject_malformed;
+            if (reject_malformed.load_model(malformed, &malformed_error) || malformed_error.empty() || reject_malformed.model_loaded()) return fail(2);
+            TAPA::Model::Model valid_piece_model;
+            valid_piece_model.piece_weights.feature_weights.resize(TAPA::Accumulator::PieceFeatureCount - 1);
+            if (TAPA::Model::save("tapa_invalid_piece_model.bin", valid_piece_model, &malformed_error)) return fail(3);
+            valid_piece_model.piece_weights.feature_weights.resize(TAPA::Accumulator::PieceFeatureCount + 1);
+            if (TAPA::Model::save("tapa_invalid_piece_model.bin", valid_piece_model, &malformed_error)) return fail(4);
             static TAPA::Model::Model model;
             model.pawn_weights.bias = 17;
             model.pawn_weights.bit_weights[3][7] = -11;
-            model.network_weights.layer1.weights[0][0] = 23;
             model.network_weights.layer2.bias[4] = -9;
             model.network_weights.output.weights[7][0] = 31;
             model.piece_weights.bias = -13;
             model.piece_weights.feature_weights[19][2] = -7;
+            model.network_weights.layer1.weights[0][0] = 1;
+            model.network_weights.layer1.weights[256][0] = 1;
+            model.network_weights.layer2.weights[0][0] = 1;
+            model.network_weights.output.weights[0][0] = 1;
+            model.network_weights.output_scale = 1;
+            model.piece_weights.feature_weights[3836][0] = 30;
+            model.piece_weights.feature_weights[46162][0] = 5;
             const std::string path = "tapa_test_model.bin";
             std::string error;
-            if (!TAPA::Model::save(path, model, &error)) { std::printf("model save failed: %s\n", error.c_str()); return false; }
+            if (!TAPA::Model::save(path, model, &error)) { std::printf("model save failed: %s\n", error.c_str()); return fail(5); }
             const auto load_path = std::string("tapa_test_model_loaded.bin");
             const auto loaded = TAPA::Model::load(path);
-            if (!loaded) { std::printf("model load failed: %s\n", loaded.error.c_str()); std::remove(path.c_str()); std::remove(load_path.c_str()); return false; }
+            if (!loaded) { std::printf("model load failed: %s\n", loaded.error.c_str()); std::remove(path.c_str()); std::remove(load_path.c_str()); return fail(6); }
             if (loaded.model.pawn_weights.bias != 17 ||
                 loaded.model.pawn_weights.bit_weights[3][7] != -11 ||
-                loaded.model.network_weights.layer1.weights[0][0] != 23 ||
+                loaded.model.network_weights.layer1.weights[0][0] != 1 ||
                 loaded.model.network_weights.layer2.bias[4] != -9 ||
                 loaded.model.network_weights.output.weights[7][0] != 31 ||
                 loaded.model.piece_weights.bias != -13 ||
-                loaded.model.piece_weights.feature_weights[19][2] != -7) { std::remove(path.c_str()); std::remove(load_path.c_str()); return false; }
+                loaded.model.piece_weights.feature_weights[19][2] != -7) { std::remove(path.c_str()); std::remove(load_path.c_str()); return fail(7); }
             NNUE loaded_nnue;
-            loaded_nnue.load_model(loaded.model);
+            if (!loaded_nnue.load_model(loaded.model)) { std::remove(path.c_str()); std::remove(load_path.c_str()); return fail(8); }
             loaded_nnue.initialize(0);
+            if (!loaded_nnue.model_loaded() || loaded_nnue.evaluate_current() != 0) { std::remove(path.c_str()); return fail(9); }
+            NNUE shared_first, shared_second;
+            std::shared_ptr<const TAPA::NNUEModel> shared_model;
+            try { shared_model = std::make_shared<const TAPA::NNUEModel>(loaded.model); }
+            catch (...) { std::remove(path.c_str()); return fail(10); }
+            if (!shared_first.load_model(shared_model) || !shared_second.load_model(shared_model)) { std::remove(path.c_str()); return fail(11); }
+            Position shared_start = kings_only();
+            add(shared_start, PieceType::Knight, PieceColor::White, 18);
+            const auto initial_first = shared_first.evaluate(shared_start);
+            const auto initial_second = shared_second.evaluate(shared_start);
+            if (initial_first == 0) { std::remove(path.c_str()); return fail(12); }
+            Position shared_next = shared_start;
+            shared_next.pieces[2].square = 19;
+            if (shared_first.update(shared_start, shared_next) != NNUE::UpdateStatus::Updated ||
+                shared_second.evaluate_current() != initial_second) {
+                std::remove(path.c_str()); return fail(13);
+            }
+            const auto prior_load_model = shared_model;
+            const auto score_before_failed_load = shared_first.evaluate_current();
+            if (shared_first.load_model(std::shared_ptr<const TAPA::NNUEModel>{}, &error) ||
+                !shared_first.model_loaded() || shared_first.evaluate_current() != score_before_failed_load ||
+                prior_load_model.use_count() < 2 || error.empty()) {
+                std::remove(path.c_str()); return fail(14);
+            }
+            std::array<std::int32_t, 4> worker_scores{};
+            std::vector<std::thread> workers;
+            for (std::size_t worker = 0; worker < worker_scores.size(); ++worker) {
+                workers.emplace_back([&, worker] {
+                    NNUE local;
+                    if (!local.load_model(shared_model)) return;
+                    Position pos = kings_only();
+                    add(pos, PieceType::Knight, PieceColor::White, 18);
+                    worker_scores[worker] = local.evaluate(pos);
+                });
+            }
+            for (auto& worker : workers) worker.join();
+            for (auto score : worker_scores)
+                if (score != worker_scores[0]) { std::remove(path.c_str()); return fail(15); }
             (void)loaded_nnue.evaluate(kings_only());
             {
                 std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
@@ -255,18 +352,18 @@ namespace TAPA::Tests
                 file.seekp(64, std::ios::beg);
                 file.put(static_cast<char>(original ^ 0x55));
             }
-            if (TAPA::Model::load(path)) { std::remove(path.c_str()); std::remove(load_path.c_str()); return false; }
+            if (TAPA::Model::load(path)) { std::remove(path.c_str()); std::remove(load_path.c_str()); return fail(16); }
             model.input_size = 513;
-            if (TAPA::Model::save(path, model, &error)) { std::remove(path.c_str()); std::remove(load_path.c_str()); return false; }
+            if (TAPA::Model::save(path, model, &error)) { std::remove(path.c_str()); std::remove(load_path.c_str()); return fail(17); }
             model.input_size = TAPA::Model::InputSize;
-            if (!TAPA::Model::save(path, model, &error)) { std::remove(path.c_str()); return false; }
+            if (!TAPA::Model::save(path, model, &error)) { std::printf("save18 error: %s\n", error.c_str()); return fail(18); }
             {
                 std::ifstream input(path, std::ios::binary);
                 std::ofstream output(load_path, std::ios::binary | std::ios::trunc);
                 output << input.rdbuf();
                 output.put('X');
             }
-            if (TAPA::Model::load(load_path)) { std::remove(path.c_str()); std::remove(load_path.c_str()); return false; }
+            if (TAPA::Model::load(load_path)) { std::remove(path.c_str()); std::remove(load_path.c_str()); return fail(19); }
             std::remove(path.c_str());
             std::remove(load_path.c_str());
             return true;
@@ -317,6 +414,21 @@ namespace TAPA::Tests
 
         bool piece_accumulator_tests()
         {
+            TAPA::Accumulator::PieceWeights invalid_weights;
+            invalid_weights.feature_weights.resize(0);
+            TAPA::Accumulator::PieceKingAccumulator guarded;
+            Feature invalid_feature{0, 1, PieceColor::White};
+            guarded.reset(123);
+            guarded.add(invalid_feature, invalid_weights);
+            guarded.remove(invalid_feature, invalid_weights);
+            FeatureSet invalid_set;
+            invalid_set.add(invalid_feature);
+            guarded.reconstruct(invalid_set, invalid_weights, PieceColor::White);
+            guarded.update(invalid_set, {}, invalid_weights, PieceColor::White);
+            if (invalid_weights.valid() || guarded.data()[0] != 0) return false;
+            TAPA::Accumulator::PieceWeights oversized_weights;
+            oversized_weights.feature_weights.push_back({});
+            if (oversized_weights.valid()) return false;
             static TAPA::Accumulator::PieceWeights weights;
             for (std::size_t index = 0; index < weights.feature_weights.size(); ++index)
                 for (std::size_t neuron = 0; neuron < weights.feature_weights[index].size(); ++neuron)
@@ -636,17 +748,25 @@ namespace TAPA::Tests
 
         bool nnue_tests()
         {
+            NNUE no_model;
+            if (no_model.model_loaded() || no_model.evaluate(kings_only()) != 0 || no_model.evaluate_current() != 0) return false;
+            TAPA::Model::Model test_model;
             NNUE nnue;
+            if (!nnue.load_model(test_model)) return false;
             nnue.initialize(0);
             Position before = kings_only();
             add(before, PieceType::Knight, PieceColor::White, 18);
             const int32_t initial_score = nnue.evaluate(before);
+            if (nnue.update(before, before) != NNUE::UpdateStatus::Unchanged ||
+                nnue.update(before, Position{}) != NNUE::UpdateStatus::InvalidPosition) return false;
+            if (nnue.evaluate(before) != initial_score) return false;
 
             Position after = before;
             after.pieces[2].square = 21;
             nnue.push();
             nnue.update(before, after);
             TAPA::NNUE reconstructed;
+            if (!reconstructed.load_model(test_model)) return false;
             reconstructed.initialize(0);
             const int32_t incremental_score = nnue.evaluate_current();
             const int32_t reconstructed_score = reconstructed.evaluate(after);
@@ -680,11 +800,17 @@ namespace TAPA::Tests
             repeat_after.pieces[black_pawn_index].square = 44;
             (void)nnue.evaluate(repeat_before);
             const auto misses_before = nnue.pawn_cache_stats().misses;
+            const auto hits_before = nnue.pawn_cache_stats().hits;
+            const auto insertions_before = nnue.pawn_cache_insertions();
             nnue.update(repeat_before, repeat_after);
             const auto misses_after = nnue.pawn_cache_stats().misses;
             const auto hits_after = nnue.pawn_cache_stats().hits;
             const int repeated_score = reconstructed.evaluate(repeat_after);
-            return nnue.evaluate_current() == repeated_score && misses_after == misses_before && hits_after > 0;
+            const bool cache_consistent = nnue.evaluate_current() == repeated_score && misses_after == misses_before &&
+                hits_after == hits_before && nnue.pawn_cache_insertions() == insertions_before + 1;
+            if (!cache_consistent) std::printf("nnue: cache current=%d reconstructed=%d misses=%zu/%zu hits=%zu\\n",
+                nnue.evaluate_current(), repeated_score, misses_before, misses_after, hits_after);
+            return cache_consistent;
         }
 
         bool memory_layout_tests()

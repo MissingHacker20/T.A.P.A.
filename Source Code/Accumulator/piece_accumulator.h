@@ -11,11 +11,15 @@ constexpr std::size_t PieceNeuronCount = NeuronCount;
 using PieceWeight = std::int16_t;
 constexpr std::size_t PieceFeatureCount = 64 * 2 * 6 * 64;
 static_assert(PieceFeatureCount == 49152);
+// Maximum generated features per legal adapter position is 60. A single feature
+// contributes int16_weight * {-1,0,1}; the sum plus int32 bias fits int64.
+constexpr std::size_t MaxActivePieceFeatures = 60;
 struct PieceWeights {
     AccumulatorValue bias = 0;
     // Canonical order is the Feature::index order.
     std::vector<std::array<PieceWeight, NeuronCount>> feature_weights;
     PieceWeights() : feature_weights(PieceFeatureCount) {}
+    bool valid() const noexcept { return feature_weights.size() == PieceFeatureCount; }
 };
 
 class PieceKingAccumulator {

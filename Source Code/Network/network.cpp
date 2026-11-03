@@ -3,6 +3,7 @@
 #include "network_model.h"
 #include <cstdint>
 #include <limits>
+#include <algorithm>
 
 namespace TAPA {
 namespace Network {
@@ -36,12 +37,10 @@ int32_t Network::forward_pass(const std::array<std::int32_t, AccumulatorNeuronCo
     std::array<int32_t, HiddenSize2> hidden2{};
     layer2.forward(hidden1, hidden2, activation_limit);
     std::array<int32_t, OutputSize> output{};
-    output_layer.forward(hidden2, output, activation_limit);
+    output_layer.forward_linear(hidden2, output);
     const std::int64_t scaled = static_cast<std::int64_t>(output[0]) * output_scale;
-    return static_cast<std::int32_t>(scaled < std::numeric_limits<std::int32_t>::min()
-        ? std::numeric_limits<std::int32_t>::min()
-        : (scaled > std::numeric_limits<std::int32_t>::max()
-            ? std::numeric_limits<std::int32_t>::max() : scaled));
+    return static_cast<std::int32_t>(std::clamp<std::int64_t>(scaled,
+        std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()));
 }
 
 } // namespace Network

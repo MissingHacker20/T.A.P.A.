@@ -5,15 +5,22 @@
 #include "../Source Code/Network/network.h"
 #include "../Source Code/Network/network_model.h"
 #include "../Source Code/NNUE/nnue.h"
+#include "../Source Code/Model/model.h"
 #include <chrono>
 #include <cstdint>
 #include <iostream>
 #include <array>
+#include <algorithm>
+#include <thread>
+#include <vector>
 
 namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t Iterations = 20000;
+constexpr std::size_t BenchmarkRepeats = 7;
 volatile std::int64_t benchmark_sink = 0;
+
+struct TimingSummary { long long median_us = 0; long long min_us = 0; long long max_us = 0; };
 
 template <typename Function>
 long long measure_us(Function&& function) {
@@ -21,6 +28,15 @@ long long measure_us(Function&& function) {
     function();
     return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - begin).count();
 }
+
+template <typename Function>
+TimingSummary measure_repeated(Function&& function) {
+    std::array<long long, BenchmarkRepeats> samples{};
+    for (auto& sample : samples) sample = measure_us(function);
+    std::sort(samples.begin(), samples.end());
+    return {samples[samples.size() / 2], samples.front(), samples.back()};
+}
+
 
 TAPA::Features::Position benchmark_position() {
     using namespace TAPA::Features;
@@ -73,7 +89,7 @@ int main() {
     });
 
     std::array<DecodedPawn, 32> decoded{};
-    const auto key_us = measure_us([&] {
+    measure_us([&] {
         for (std::size_t i = 0; i < Iterations; ++i) {
             const PawnStructureKey key = make_pawn_structure_key(position);
             benchmark_sink += static_cast<std::int64_t>(decode_pawn_structure_key(key, decoded));
@@ -159,29 +175,74 @@ int main() {
             benchmark_sink += network.forward_pass(white, black);
     });
 
+    TAPA::Model::Model benchmark_model;
+    std::shared_ptr<const TAPA::NNUEModel> shared_model = std::make_shared<const TAPA::NNUEModel>(benchmark_model);
     TAPA::NNUE nnue;
+    (void)nnue.load_model(shared_model);
     nnue.initialize(0);
     const auto nnue_us = measure_us([&] {
         for (std::size_t i = 0; i < Iterations; ++i)
             benchmark_sink += nnue.evaluate(position);
     });
+    (void)nnue.evaluate(position);
+    const auto evaluate_current_us = measure_us([&] {
+        for (std::size_t i = 0; i < Iterations; ++i)
+            benchmark_sink += nnue.evaluate_current();
+    });
+    Position updated_position{};
+    const bool update_possible = apply_move(position, knight_move, updated_position);
+    const auto nnue_incremental_us = update_possible ? measure_us([&] {
+        for (std::size_t i = 0; i < Iterations; ++i) {
+            nnue.update(position, knight_move, updated_position);
+            nnue.update(updated_position, knight_move, position);
+        }
+    }) : 0;
+    const auto forward_only = measure_repeated([&] {
+        for (std::size_t i = 0; i < Iterations; ++i)
+            benchmark_sink += network.forward_pass(white, black);
+    });
+    const auto reconstruct_only = measure_repeated([&] {
+        for (std::size_t i = 0; i < Iterations; ++i)
+            full.reconstruct(benchmark_key(i), weights);
+    });
+    const auto current_only = measure_repeated([&] {
+        for (std::size_t i = 0; i < Iterations; ++i)
+            benchmark_sink += nnue.evaluate_current();
+    });
+    std::vector<long long> worker_times;
+    for (std::size_t worker_count : {1u, 2u, 4u}) {
+        std::vector<std::thread> workers;
+        const auto elapsed = measure_us([&] {
+            for (std::size_t worker = 0; worker < worker_count; ++worker)
+                workers.emplace_back([&] {
+                    TAPA::NNUE local;
+                    for (std::size_t i = 0; i < Iterations / worker_count; ++i)
+                        benchmark_sink += local.evaluate(position);
+                });
+            for (auto& worker : workers) worker.join();
+        });
+        worker_times.push_back(elapsed);
+    }
 
     const auto hit_stats = hit_cache.stats();
-    std::cout << "pawn_key_decode_us=" << key_us << '\n'
-              << "features_reconstruction_us=" << feature_us << '\n'
-              << "pawn_reconstruction_us=" << rebuild_us << '\n'
-              << "pawn_incremental_us=" << incremental_us << '\n'
+    std::cout << "benchmark_iterations=" << Iterations << " repeats=" << BenchmarkRepeats << '\n'
+              << "network_forward_us=" << network_us << " median/min/max=" << forward_only.median_us << '/' << forward_only.min_us << '/' << forward_only.max_us << '\n'
+              << "nnue_evaluate_us=" << nnue_us << '\n'
+              << "nnue_evaluate_current_us=" << evaluate_current_us << " median/min/max=" << current_only.median_us << '/' << current_only.min_us << '/' << current_only.max_us << '\n'
+              << "nnue_incremental_update_pair_us=" << nnue_incremental_us << '\n'
+              << "pawn_full_reconstruction_us=" << rebuild_us << " median/min/max=" << reconstruct_only.median_us << '/' << reconstruct_only.min_us << '/' << reconstruct_only.max_us << '\n'
               << "pawn_cache_hit_us=" << cache_hit_us << " hits=" << hit_stats.hits << " misses=" << hit_stats.misses << '\n'
-              << "pawn_cache_hit_miss_pair_us=" << cache_hit_plus_miss_us << '\n'
               << "pawn_cache_miss_us=" << cache_miss_us << " hits=" << miss_cache.stats().hits << " misses=" << miss_cache.stats().misses << '\n'
+              << "workers_1_2_4_elapsed_us=" << worker_times[0] << '/' << worker_times[1] << '/' << worker_times[2] << '\n'
               << "full_position_delta_us=" << full_delta_us << '\n'
+              << "features_reconstruction_us=" << feature_us << '\n'
+              << "pawn_incremental_us=" << incremental_us << '\n'
               << "piece_reconstruction_us=" << piece_reconstruct_us << '\n'
               << "piece_incremental_us=" << piece_update_us << '\n'
               << "full_feature_delta_comparison_us=" << delta_us << '\n'
               << "move_incremental_feature_delta_us=" << incremental_delta_us << '\n'
               << "piece_move_delta_incremental_roundtrip_us=" << piece_delta_update_us << '\n'
-              << "network_forward_us=" << network_us << '\n'
-              << "nnue_evaluate_us=" << nnue_us << '\n'
+              << "pawn_cache_hit_miss_pair_us=" << cache_hit_plus_miss_us << '\n'
               << "sizeof(PawnStructureKey)=" << sizeof(PawnStructureKey)
               << " sizeof(Feature)=" << sizeof(TAPA::Features::Feature)
               << " sizeof(PawnAccumulator)=" << sizeof(PawnAccumulator)
@@ -191,6 +252,9 @@ int main() {
                     TAPA::Accumulator::PieceFeatureCount * sizeof(std::array<TAPA::Accumulator::PieceWeight, TAPA::Accumulator::NeuronCount>)
               << " sizeof(Accumulator)=" << sizeof(Accumulator)
               << " sizeof(NNUE)=" << sizeof(TAPA::NNUE)
+              << " nnue_worker_state_bytes=" << nnue.worker_state_bytes()
+              << " nnue_owned_weight_estimate_bytes=" << nnue.owned_weight_bytes()
+              << " nnue_shared_model_bytes=" << TAPA::NNUE::model_bytes(*shared_model)
               << " network_weights_bytes=" << sizeof(TAPA::Network::NetworkWeights)
               << " nnue_feature_weights_bytes=" << TAPA::NNUE::weights_bytes()
               << " nnue_cache_bytes=" << nnue.pawn_cache_bytes()

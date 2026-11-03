@@ -1,9 +1,21 @@
 #include "pawn_accumulator.h"
+#include <limits>
 
 namespace TAPA::Accumulator
 {
 
     void PawnAccumulator::reset(PawnAccumulatorValue bias) noexcept { data_.fill(bias); }
+
+    namespace {
+        PawnAccumulatorValue saturating_add(PawnAccumulatorValue current, std::int64_t delta) noexcept
+        {
+            const std::int64_t sum = static_cast<std::int64_t>(current) + delta;
+            return static_cast<PawnAccumulatorValue>(sum < std::numeric_limits<PawnAccumulatorValue>::min()
+                ? std::numeric_limits<PawnAccumulatorValue>::min()
+                : sum > std::numeric_limits<PawnAccumulatorValue>::max()
+                    ? std::numeric_limits<PawnAccumulatorValue>::max() : sum);
+        }
+    }
 
     void PawnAccumulator::reconstruct(Features::PawnStructureKey key, const PawnWeights &weights) noexcept
     {
@@ -13,7 +25,7 @@ namespace TAPA::Accumulator
             if (((key >> bit) & 1ULL) == 0)
                 continue;
             for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
-                data_[neuron] += weights.bit_weights[bit][neuron];
+                data_[neuron] = saturating_add(data_[neuron], weights.bit_weights[bit][neuron]);
         }
     }
 
@@ -28,10 +40,10 @@ namespace TAPA::Accumulator
             const Features::PawnStructureKey mask = Features::PawnStructureKey{1} << bit;
             if ((removed & mask) != 0)
                 for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
-                    data_[neuron] -= weights.bit_weights[bit][neuron];
+                    data_[neuron] = saturating_add(data_[neuron], -static_cast<std::int64_t>(weights.bit_weights[bit][neuron]));
             if ((added & mask) != 0)
                 for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
-                    data_[neuron] += weights.bit_weights[bit][neuron];
+                    data_[neuron] = saturating_add(data_[neuron], weights.bit_weights[bit][neuron]);
         }
     }
 
@@ -85,6 +97,29 @@ namespace TAPA::Accumulator
         return replacement->accumulator;
     }
 
+    void PawnAccumulatorCache::insert(Features::PawnStructureKey key, const PawnAccumulator &accumulator) noexcept
+    {
+        ++clock_;
+        Entry *replacement = nullptr;
+        for (Entry &entry : entries_) {
+            if (entry.valid && entry.key == key) {
+                replacement = &entry;
+                break;
+            }
+            if (!entry.valid) {
+                replacement = &entry;
+                break;
+            }
+            if (replacement == nullptr || entry.age < replacement->age)
+                replacement = &entry;
+        }
+        replacement->key = key;
+        replacement->accumulator = accumulator;
+        replacement->age = clock_;
+        replacement->valid = true;
+        ++insertions_;
+    }
+
     bool PawnAccumulatorCache::contains(Features::PawnStructureKey key) const noexcept
     {
         for (const Entry &entry : entries_)
@@ -99,6 +134,7 @@ namespace TAPA::Accumulator
             entry.valid = false;
         clock_ = 0;
         stats_ = {};
+        insertions_ = 0;
     }
 
 } // namespace TAPA::Accumulator

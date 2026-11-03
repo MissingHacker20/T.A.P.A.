@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <type_traits>
 #include "../Accumulator/accumulator.h"
 
 namespace TAPA::Network { struct NetworkWeights; }
@@ -18,14 +19,17 @@ constexpr int HiddenSize2 = 32;
 constexpr int OutputSize = 1;
 static_assert(AccumulatorNeuronCount == 256, "Update the versioned model architecture and input schema when changing the embedding width");
 
-// Clipped ReLU activation
+// Clipped ReLU for hidden layers; output layer is linear.
 inline int32_t clipped_relu(int32_t x, int32_t limit) {
     if (x < 0) return 0;
     if (x > limit) return limit;
     return x;
 }
 
-// Layer definition
+// Compute a complete dot product in int64_t before activation. For the supported
+// architecture (fan-in <= 512), int32 inputs and weights give a conservative absolute
+// bound below 2^62 including an int32 bias, so accumulation is defined without overflow.
+// Each completed sum is saturated to int32 before activation/output scaling.
 template<int In, int Out>
 class Layer {
 public:
@@ -35,18 +39,32 @@ public:
     void forward(const std::array<int32_t, In>& in,
                  std::array<int32_t, Out>& out,
                  int32_t limit) const {
+        const std::int32_t safe_limit = limit < 0 ? 0 : limit;
         for (int j = 0; j < Out; ++j) {
-            std::int32_t bounded = bias[j];
-            for (int i = 0; i < In; ++i) {
-                const std::int64_t product = static_cast<std::int64_t>(in[i]) * weights[i][j];
-                const std::int64_t sum = static_cast<std::int64_t>(bounded) + product;
-                bounded = static_cast<std::int32_t>(sum < std::numeric_limits<std::int32_t>::min()
-                    ? std::numeric_limits<std::int32_t>::min()
-                    : (sum > std::numeric_limits<std::int32_t>::max()
-                        ? std::numeric_limits<std::int32_t>::max() : sum));
-            }
-            out[j] = clipped_relu(bounded, limit);
+            std::int64_t sum = bias[j];
+            for (int i = 0; i < In; ++i)
+                sum += static_cast<std::int64_t>(in[i]) * weights[i][j];
+            out[j] = clipped_relu(saturate_int32(sum), safe_limit);
         }
+    }
+
+    void forward_linear(const std::array<int32_t, In>& in,
+                        std::array<int32_t, Out>& out) const {
+        for (int j = 0; j < Out; ++j) {
+            std::int64_t sum = bias[j];
+            for (int i = 0; i < In; ++i)
+                sum += static_cast<std::int64_t>(in[i]) * weights[i][j];
+            out[j] = saturate_int32(sum);
+        }
+    }
+
+private:
+    static std::int32_t saturate_int32(std::int64_t value) noexcept {
+        return value < std::numeric_limits<std::int32_t>::min()
+            ? std::numeric_limits<std::int32_t>::min()
+            : value > std::numeric_limits<std::int32_t>::max()
+                ? std::numeric_limits<std::int32_t>::max()
+                : static_cast<std::int32_t>(value);
     }
 };
 

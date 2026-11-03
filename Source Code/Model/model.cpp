@@ -1,12 +1,21 @@
 #include "model.h"
 #include <fstream>
 #include <vector>
+#include <cstdio>
+#include <chrono>
+#include <thread>
 #include "../Network/network.h"
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace TAPA::Model {
 namespace {
 constexpr std::size_t PayloadSizeValue =
-    6 * sizeof(std::uint32_t) +
+    7 * sizeof(std::uint32_t) +
     64 * static_cast<std::size_t>(Accumulator::PawnNeuronCount) * sizeof(Accumulator::PawnWeight) +
     static_cast<std::size_t>(Accumulator::PieceFeatureCount) * Accumulator::NeuronCount * sizeof(Accumulator::PieceWeight) +
     (static_cast<std::size_t>(Network::InputSize) * Network::HiddenSize1 + Network::HiddenSize1 +
@@ -61,10 +70,12 @@ std::uint32_t checksum(const std::vector<std::uint8_t>& bytes) {
 }
 
 bool save(const std::string& path, const Model& model, std::string* error) {
-    if (model.input_size != InputSize || model.hidden1_size != Hidden1Size ||
+    if (path.empty()) { if (error) *error = "empty model path"; return false; }
+    if (!model.piece_weights.valid() || model.input_size != InputSize || model.hidden1_size != Hidden1Size ||
         model.hidden2_size != Hidden2Size || model.output_size != OutputSize ||
         model.feature_index_version != FeatureIndexVersion ||
         model.pawn_structure_version != PawnStructureEncodingVersion ||
+        model.network_schema_version != NetworkSchemaVersion ||
         model.network_weights.activation_limit <= 0 || model.network_weights.output_scale <= 0) {
         if (error) *error = "incompatible or invalid model architecture";
         return false;
@@ -75,6 +86,7 @@ bool save(const std::string& path, const Model& model, std::string* error) {
     append_u32(payload, model.hidden2_size); append_u32(payload, model.output_size);
     append_u32(payload, model.feature_index_version);
     append_u32(payload, model.pawn_structure_version);
+    append_u32(payload, model.network_schema_version);
     append_i32(payload, model.pawn_weights.bias);
     for (const auto& row : model.pawn_weights.bit_weights)
         for (Accumulator::PawnWeight value : row) append_i16(payload, value);
@@ -89,17 +101,43 @@ bool save(const std::string& path, const Model& model, std::string* error) {
     for (std::int32_t value : model.network_weights.output.bias) append_i32(payload, value);
     append_i32(payload, model.network_weights.activation_limit);
     append_i32(payload, model.network_weights.output_scale);
-    std::ofstream out(path, std::ios::binary);
+    if (payload.size() != PayloadSize) {
+        if (error) *error = "internal model payload size mismatch";
+        return false;
+    }
+    const std::string temporary_path = path + ".tmp";
+    std::ofstream out(temporary_path, std::ios::binary | std::ios::trunc);
     if (!out) { if (error) *error = "cannot open model for writing"; return false; }
     out.write(Magic.data(), Magic.size()); write_u32(out, FormatVersion); write_u32(out, EndianMarker); write_u32(out, Accumulator::PawnNeuronCount);
     write_u32(out, PayloadSize); write_u32(out, checksum(payload));
     out.write(reinterpret_cast<const char*>(payload.data()), static_cast<std::streamsize>(payload.size()));
+    out.flush();
     if (!out) {
         if (error) *error = "cannot write model";
+        out.close();
+        std::remove(temporary_path.c_str());
         return false;
     }
-    if (payload.size() != PayloadSize) {
-        if (error) *error = "internal model payload size mismatch";
+    out.close();
+    // Filesystem watchers (antivirus, cloud sync) may briefly lock freshly written
+    // files, so the replace is retried a few times before failing.
+    bool replaced = false;
+    for (int attempt = 0; attempt < 5 && !replaced; ++attempt) {
+#ifdef _WIN32
+        replaced = MoveFileExA(temporary_path.c_str(), path.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+        if (!replaced) {
+            if (std::remove(path.c_str()) == 0)
+                replaced = std::rename(temporary_path.c_str(), path.c_str()) == 0;
+        }
+#else
+        replaced = std::rename(temporary_path.c_str(), path.c_str()) == 0;
+#endif
+        if (!replaced) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (!replaced) {
+        if (error) *error = "cannot replace model file";
+        std::remove(temporary_path.c_str());
         return false;
     }
     return true;
@@ -107,6 +145,7 @@ bool save(const std::string& path, const Model& model, std::string* error) {
 
 LoadResult load(const std::string& path) {
     LoadResult result;
+    if (path.empty()) { result.error = "empty model path"; return result; }
     std::ifstream in(path, std::ios::binary);
     if (!in) { result.error = "cannot open model"; return result; }
     std::array<char, 8> magic{}; in.read(magic.data(), magic.size());
@@ -141,7 +180,8 @@ LoadResult load(const std::string& path) {
     if (result.model.input_size != InputSize || result.model.hidden1_size != Hidden1Size ||
         result.model.hidden2_size != Hidden2Size || result.model.output_size != OutputSize ||
         (result.model.feature_index_version = read_u32_payload()) != FeatureIndexVersion ||
-        (result.model.pawn_structure_version = read_u32_payload()) != PawnStructureEncodingVersion) {
+        (result.model.pawn_structure_version = read_u32_payload()) != PawnStructureEncodingVersion ||
+        (result.model.network_schema_version = read_u32_payload()) != NetworkSchemaVersion) {
         result.error = "incompatible model architecture";
         return result;
     }

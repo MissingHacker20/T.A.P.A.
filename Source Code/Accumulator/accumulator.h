@@ -12,6 +12,8 @@ namespace Accumulator {
 // Architectural embedding width v3; also stored in the model header so a
 // mismatching model is rejected at load time.
 constexpr std::size_t NeuronCount = 256;
+// Stored values saturate to int32_t. Products/sums are formed in int64_t;
+// each feature coefficient is restricted to {-1,0,1}.
 using AccumulatorValue = std::int32_t;
 
 struct Accumulator {
