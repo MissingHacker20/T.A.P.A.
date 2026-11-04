@@ -126,10 +126,6 @@ bool save(const std::string& path, const Model& model, std::string* error) {
 #ifdef _WIN32
         replaced = MoveFileExA(temporary_path.c_str(), path.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
-        if (!replaced) {
-            if (std::remove(path.c_str()) == 0)
-                replaced = std::rename(temporary_path.c_str(), path.c_str()) == 0;
-        }
 #else
         replaced = std::rename(temporary_path.c_str(), path.c_str()) == 0;
 #endif
@@ -140,6 +136,7 @@ bool save(const std::string& path, const Model& model, std::string* error) {
         std::remove(temporary_path.c_str());
         return false;
     }
+    if (error) error->clear();
     return true;
 }
 

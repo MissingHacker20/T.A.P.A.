@@ -15,6 +15,7 @@ set(TAPA_SOURCES
     "Source Code/Model/model.cpp"
     "Source Code/Network/network.cpp"
     "Source Code/NNUE/nnue.cpp"
+    "Source Code/Training/training.cpp"
 )
 
 add_library(tapa_nnue STATIC ${TAPA_SOURCES})
@@ -36,6 +37,9 @@ target_compile_options(tapa_nnue PRIVATE
 
 find_package(Threads REQUIRED)
 target_link_libraries(tapa_nnue PUBLIC Threads::Threads)
+
+add_executable(tapa_train "Training/train.cpp")
+target_link_libraries(tapa_train PRIVATE tapa_nnue)
 
 include(CTest)
 option(TAPA_BUILD_TESTS "Build and register the TAPA tests" ${BUILD_TESTING})

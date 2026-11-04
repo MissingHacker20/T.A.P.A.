@@ -121,11 +121,10 @@ void NNUE::initialize(int32_t bias_value) {
 
 int32_t NNUE::evaluate(const Features::Position& pos) {
     if (!model_ || !pawn_cache_) { current_state_.valid = false; return 0; }
-    if (!pos.is_valid()) {
+    if (!TAPA::Features::generate_features(pos, current_state_.features)) {
         current_state_.valid = false;
         return 0;
     }
-    TAPA::Features::generate_features(pos, current_state_.features);
     current_state_.pawn_structure = TAPA::Features::make_pawn_structure_key(pos);
     current_state_.pawn_accumulator = pawn_cache_->get(current_state_.pawn_structure);
     current_state_.piece_white.reconstruct(current_state_.features, model_->piece, Features::PieceColor::White);
@@ -144,7 +143,7 @@ int32_t NNUE::evaluate_current() const noexcept {
 void NNUE::refresh_network_accumulators() noexcept {
     std::array<TAPA::Accumulator::AccumulatorValue, TAPA::Accumulator::NeuronCount> white{};
     std::array<TAPA::Accumulator::AccumulatorValue, TAPA::Accumulator::NeuronCount> black{};
-    const std::int64_t combine_bias = model_ ? static_cast<std::int64_t>(model_->piece.bias) + bias_ : bias_;
+    const std::int64_t combine_bias = bias_;
     white.fill(static_cast<TAPA::Accumulator::AccumulatorValue>(std::clamp<std::int64_t>(combine_bias,
         std::numeric_limits<TAPA::Accumulator::AccumulatorValue>::min(),
         std::numeric_limits<TAPA::Accumulator::AccumulatorValue>::max())));
@@ -171,10 +170,6 @@ void NNUE::refresh_network_accumulators() noexcept {
 NNUE::UpdateStatus NNUE::update(const Features::Position& previous,
                                 const Features::Position& current) noexcept {
     if (!model_) return UpdateStatus::InvalidState;
-    if (!previous.is_valid() || !current.is_valid()) {
-        current_state_.valid = false;
-        return UpdateStatus::InvalidPosition;
-    }
     if (!current_state_.valid || current_state_.position != previous) {
         (void)evaluate(previous);
         return UpdateStatus::InvalidState;
@@ -189,7 +184,7 @@ NNUE::UpdateStatus NNUE::update(const Features::Position& previous,
 }
 
 NNUE::UpdateStatus NNUE::apply_delta(const Features::FeatureDelta& delta, const Features::Position& current) noexcept {
-    if (!delta.valid || !current.is_valid() || !pawn_cache_ || !model_) {
+    if (!delta.valid || !pawn_cache_ || !model_) {
         current_state_.valid = false;
         return UpdateStatus::InvalidDelta;
     }
@@ -247,10 +242,6 @@ NNUE::UpdateStatus NNUE::apply_delta(const Features::FeatureDelta& delta, const 
 NNUE::UpdateStatus NNUE::update(const Features::Position& previous, const Features::Move& move,
                                 const Features::Position& current) noexcept {
     if (!model_) return UpdateStatus::InvalidState;
-    if (!previous.is_valid() || !current.is_valid()) {
-        current_state_.valid = false;
-        return UpdateStatus::InvalidPosition;
-    }
     if (!current_state_.valid || current_state_.position != previous) {
         (void)evaluate(previous);
         return UpdateStatus::InvalidState;

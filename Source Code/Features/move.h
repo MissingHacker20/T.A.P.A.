@@ -25,7 +25,7 @@ namespace TAPA::Features
 
     bool is_valid_move(const Position &position, const Move &move) noexcept;
     bool apply_move(const Position &position, const Move &move, Position &result) noexcept;
-    // Move-oriented delta; requires current to equal apply_move(previous, move).
+    // Move-oriented delta trusts the host-supplied transition and does not check chess legality.
     FeatureDelta update_features(const Position &previous, const Move &move, const Position &current) noexcept;
 
 } // namespace TAPA::Features

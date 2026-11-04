@@ -17,7 +17,7 @@ namespace TAPA::Model
     constexpr std::uint32_t Hidden1Size = 32;
     constexpr std::uint32_t Hidden2Size = 32;
     constexpr std::uint32_t OutputSize = 1;
-    constexpr std::uint32_t NetworkSchemaVersion = 2; // signed linear output, int64 dot products
+    constexpr std::uint32_t NetworkSchemaVersion = 2; // clipped ReLU and signed linear output
 
     constexpr std::uint32_t FeatureIndexVersion = 1;
     constexpr std::uint32_t PawnStructureEncodingVersion = 1;

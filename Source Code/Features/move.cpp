@@ -63,7 +63,13 @@ bool is_valid_move(const Position& position, const Move& move) noexcept {
         if (move.color == PieceColor::Black && square_rank(move.from) != 7) return false;
         if (square_file(move.from) != 4 || square_file(move.to) != (move.king_side ? 6 : 2)) return false;
         if (square_rank(move.rook_from) != square_rank(move.from) || square_rank(move.rook_to) != square_rank(move.from)) return false;
-        if (std::abs(square_file(move.rook_to) - square_file(move.rook_from)) != 2) return false;
+        const int rook_step = move.king_side ? -1 : 1;
+        for (int file = square_file(move.rook_from) + rook_step;
+             file != square_file(move.rook_to); file += rook_step) {
+            const int square = square_rank(move.from) * 8 + file;
+            for (std::size_t i = 0; i < position.num_pieces; ++i)
+                if (position.pieces[i].square == square) return false;
+        }
     }
     if (move.en_passant) {
         if (!move.capture || move.moving_type != PieceType::Pawn || !is_valid_square(move.captured_square) || move.captured_square == move.to) return false;
@@ -166,9 +172,23 @@ bool apply_move(const Position& position, const Move& move, Position& result) no
 
 FeatureDelta update_features(const Position& previous, const Move& move, const Position& current) noexcept {
     FeatureDelta delta;
-    if (!is_valid_move(previous, move)) return delta;
-    Position expected{};
-    if (!apply_move(previous, move, expected) || expected != current) return delta;
+    if (!previous.is_feature_compatible() || !current.is_feature_compatible() ||
+        !is_valid_color(move.color) || !is_valid_square(move.from) ||
+        !is_valid_square(move.to) || move.from == move.to ||
+        static_cast<unsigned int>(move.moving_type) >= PieceTypes ||
+        static_cast<unsigned int>(move.promotion) >= PieceTypes ||
+        static_cast<unsigned int>(move.captured_type) >= PieceTypes) return delta;
+    if (find_piece(previous, move.from, move.color, move.moving_type) < 0) return delta;
+    if (move.capture) {
+        const int capture_square = move.en_passant ? move.captured_square : move.to;
+        if (!is_valid_square(capture_square) ||
+            find_piece(previous, capture_square,
+                move.color == PieceColor::White ? PieceColor::Black : PieceColor::White,
+                move.captured_type) < 0) return delta;
+    }
+    if (move.castling &&
+        (!is_valid_square(move.rook_from) || !is_valid_square(move.rook_to) ||
+         find_piece(previous, move.rook_from, move.color, PieceType::Rook) < 0)) return delta;
     delta.previous_pawn_structure = make_pawn_structure_key(previous);
     delta.current_pawn_structure = make_pawn_structure_key(current);
 
@@ -192,7 +212,6 @@ FeatureDelta update_features(const Position& previous, const Move& move, const P
         }
     }
 
-    if (delta.removed.size > MaxFeatures || delta.added.size > MaxFeatures) return FeatureDelta{};
     const int moving_index = find_piece(previous, move.from, move.color, move.moving_type);
     if (moving_index < 0) return FeatureDelta{};
     const Piece moving_before = previous.pieces[moving_index];

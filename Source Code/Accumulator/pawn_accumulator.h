@@ -28,11 +28,12 @@ namespace TAPA::Accumulator
         const std::array<PawnAccumulatorValue, PawnNeuronCount> &data() const noexcept { return data_; }
         friend bool operator==(const PawnAccumulator &lhs, const PawnAccumulator &rhs) noexcept
         {
-            return lhs.data_ == rhs.data_;
+            return lhs.exact_data_ == rhs.exact_data_;
         }
 
     private:
         std::array<PawnAccumulatorValue, PawnNeuronCount> data_{};
+        std::array<std::int64_t, PawnNeuronCount> exact_data_{};
     };
 
     struct PawnCacheStats

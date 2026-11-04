@@ -11,9 +11,9 @@ constexpr std::size_t PieceNeuronCount = NeuronCount;
 using PieceWeight = std::int16_t;
 constexpr std::size_t PieceFeatureCount = 64 * 2 * 6 * 64;
 static_assert(PieceFeatureCount == 49152);
-// Maximum generated features per legal adapter position is 60. A single feature
+// Maximum active features per perspective on a 64-square board is 63. A single feature
 // contributes int16_weight * {-1,0,1}; the sum plus int32 bias fits int64.
-constexpr std::size_t MaxActivePieceFeatures = 60;
+constexpr std::size_t MaxActivePieceFeatures = 63;
 struct PieceWeights {
     AccumulatorValue bias = 0;
     // Canonical order is the Feature::index order.
@@ -35,6 +35,7 @@ public:
 
 private:
     std::array<AccumulatorValue, NeuronCount> data_{};
+    std::array<std::int64_t, NeuronCount> exact_data_{};
     static std::size_t slot(const Features::Feature& feature) noexcept;
 };
 

@@ -4,16 +4,19 @@
 namespace TAPA::Accumulator
 {
 
-    void PawnAccumulator::reset(PawnAccumulatorValue bias) noexcept { data_.fill(bias); }
+    void PawnAccumulator::reset(PawnAccumulatorValue bias) noexcept
+    {
+        exact_data_.fill(bias);
+        data_.fill(bias);
+    }
 
     namespace {
-        PawnAccumulatorValue saturating_add(PawnAccumulatorValue current, std::int64_t delta) noexcept
+        PawnAccumulatorValue saturate_accumulator_value(std::int64_t value) noexcept
         {
-            const std::int64_t sum = static_cast<std::int64_t>(current) + delta;
-            return static_cast<PawnAccumulatorValue>(sum < std::numeric_limits<PawnAccumulatorValue>::min()
+            return static_cast<PawnAccumulatorValue>(value < std::numeric_limits<PawnAccumulatorValue>::min()
                 ? std::numeric_limits<PawnAccumulatorValue>::min()
-                : sum > std::numeric_limits<PawnAccumulatorValue>::max()
-                    ? std::numeric_limits<PawnAccumulatorValue>::max() : sum);
+                : value > std::numeric_limits<PawnAccumulatorValue>::max()
+                    ? std::numeric_limits<PawnAccumulatorValue>::max() : value);
         }
     }
 
@@ -25,8 +28,10 @@ namespace TAPA::Accumulator
             if (((key >> bit) & 1ULL) == 0)
                 continue;
             for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
-                data_[neuron] = saturating_add(data_[neuron], weights.bit_weights[bit][neuron]);
+                exact_data_[neuron] += weights.bit_weights[bit][neuron];
         }
+        for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
+            data_[neuron] = saturate_accumulator_value(exact_data_[neuron]);
     }
 
     void PawnAccumulator::update(Features::PawnStructureKey old_key,
@@ -40,11 +45,13 @@ namespace TAPA::Accumulator
             const Features::PawnStructureKey mask = Features::PawnStructureKey{1} << bit;
             if ((removed & mask) != 0)
                 for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
-                    data_[neuron] = saturating_add(data_[neuron], -static_cast<std::int64_t>(weights.bit_weights[bit][neuron]));
+                    exact_data_[neuron] -= weights.bit_weights[bit][neuron];
             if ((added & mask) != 0)
                 for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
-                    data_[neuron] = saturating_add(data_[neuron], weights.bit_weights[bit][neuron]);
+                    exact_data_[neuron] += weights.bit_weights[bit][neuron];
         }
+        for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
+            data_[neuron] = saturate_accumulator_value(exact_data_[neuron]);
     }
 
     const PawnAccumulator *PawnAccumulatorCache::find(Features::PawnStructureKey key) const noexcept

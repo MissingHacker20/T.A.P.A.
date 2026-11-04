@@ -26,10 +26,8 @@ inline int32_t clipped_relu(int32_t x, int32_t limit) {
     return x;
 }
 
-// Compute a complete dot product in int64_t before activation. For the supported
-// architecture (fan-in <= 512), int32 inputs and weights give a conservative absolute
-// bound below 2^62 including an int32 bias, so accumulation is defined without overflow.
-// Each completed sum is saturated to int32 before activation/output scaling.
+// Preserve the complete dot product, including cancellation, before saturating it to
+// int32. A fan-in of 512 with unrestricted int32 inputs and weights can exceed int64.
 template<int In, int Out>
 class Layer {
 public:
@@ -41,31 +39,54 @@ public:
                  int32_t limit) const {
         const std::int32_t safe_limit = limit < 0 ? 0 : limit;
         for (int j = 0; j < Out; ++j) {
-            std::int64_t sum = bias[j];
+            WideAccumulator sum;
+            sum.add(bias[j]);
             for (int i = 0; i < In; ++i)
-                sum += static_cast<std::int64_t>(in[i]) * weights[i][j];
-            out[j] = clipped_relu(saturate_int32(sum), safe_limit);
+                sum.add(static_cast<std::int64_t>(in[i]) * weights[i][j]);
+            out[j] = clipped_relu(sum.saturate_int32(), safe_limit);
         }
     }
 
     void forward_linear(const std::array<int32_t, In>& in,
                         std::array<int32_t, Out>& out) const {
         for (int j = 0; j < Out; ++j) {
-            std::int64_t sum = bias[j];
+            WideAccumulator sum;
+            sum.add(bias[j]);
             for (int i = 0; i < In; ++i)
-                sum += static_cast<std::int64_t>(in[i]) * weights[i][j];
-            out[j] = saturate_int32(sum);
+                sum.add(static_cast<std::int64_t>(in[i]) * weights[i][j]);
+            out[j] = sum.saturate_int32();
         }
     }
 
 private:
-    static std::int32_t saturate_int32(std::int64_t value) noexcept {
-        return value < std::numeric_limits<std::int32_t>::min()
-            ? std::numeric_limits<std::int32_t>::min()
-            : value > std::numeric_limits<std::int32_t>::max()
-                ? std::numeric_limits<std::int32_t>::max()
-                : static_cast<std::int32_t>(value);
-    }
+    // Two-word two's-complement sum; individual int32 products fit int64, but their
+    // complete fan-in sum may not.
+    class WideAccumulator {
+    public:
+        void add(std::int64_t value) noexcept {
+            const std::uint64_t old_low = low_;
+            low_ += static_cast<std::uint64_t>(value);
+            high_ += (value < 0 ? -1 : 0) + (low_ < old_low ? 1 : 0);
+        }
+
+        std::int32_t saturate_int32() const noexcept {
+            constexpr std::uint64_t MinInt32Bits = 0xffffffff80000000ULL;
+            if (high_ > 0 || (high_ == 0 &&
+                low_ > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max())))
+                return std::numeric_limits<std::int32_t>::max();
+            if (high_ < -1 || (high_ == -1 && low_ < MinInt32Bits))
+                return std::numeric_limits<std::int32_t>::min();
+            if (high_ == 0) return static_cast<std::int32_t>(low_);
+            const std::uint64_t magnitude = (~low_) + 1;
+            if (magnitude == (std::uint64_t{1} << 31))
+                return std::numeric_limits<std::int32_t>::min();
+            return -static_cast<std::int32_t>(magnitude);
+        }
+
+    private:
+        std::uint64_t low_ = 0;
+        std::int64_t high_ = 0;
+    };
 };
 
 // Network is immutable during forward passes once configured; no global mutable weights are used.

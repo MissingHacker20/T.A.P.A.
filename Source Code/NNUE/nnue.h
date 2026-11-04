@@ -38,7 +38,8 @@ public:
     bool load_model(std::shared_ptr<const NNUEModel> model, std::string* error = nullptr);
     bool model_loaded() const noexcept { return static_cast<bool>(model_); }
     // Reconstruct the owned state from a position and return its score.
-    // Returns zero without a model; invalid positions invalidate the current state.
+    // Returns zero without a model or when a position cannot be represented by the feature schema.
+    // Chess legality is the host engine's responsibility.
     int32_t evaluate(const Features::Position& pos);
     // Evaluate the currently owned state without rebuilding it.
     int32_t evaluate_current() const noexcept;

@@ -91,5 +91,20 @@ int main() {
     layer.weights[1][0] = std::numeric_limits<std::int32_t>::min();
     layer.forward_linear(input, output);
     if (output[0] != std::numeric_limits<std::int32_t>::min()) return 12;
+
+    Layer<6, 1> wide_cancellation{};
+    const std::array<std::int32_t, 6> wide_input{
+        std::numeric_limits<std::int32_t>::max(), std::numeric_limits<std::int32_t>::max(),
+        std::numeric_limits<std::int32_t>::max(), std::numeric_limits<std::int32_t>::max(),
+        std::numeric_limits<std::int32_t>::max(), std::numeric_limits<std::int32_t>::max()
+    };
+    for (int index = 0; index < 3; ++index)
+        wide_cancellation.weights[static_cast<std::size_t>(index)][0] =
+            std::numeric_limits<std::int32_t>::max();
+    for (int index = 3; index < 6; ++index)
+        wide_cancellation.weights[static_cast<std::size_t>(index)][0] =
+            -std::numeric_limits<std::int32_t>::max();
+    wide_cancellation.forward_linear(wide_input, output);
+    if (output[0] != 0) return 13;
     return 0;
 }

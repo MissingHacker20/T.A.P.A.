@@ -37,7 +37,7 @@ struct Feature {
 };
 
 // FeatureSet: stores active features without dynamic allocation in typical case
-constexpr int MaxFeatures = 64; // Conservative static capacity above the chess-position bound of 60.
+constexpr int MaxFeatures = 2 * BoardSquares;
 struct FeatureSet {
     std::array<Feature, MaxFeatures> features{};
     std::size_t size = 0;
@@ -55,13 +55,22 @@ struct Piece {
 };
 
 struct Position {
-    // Public adapter used by MissingPawn until its native position API is connected.
-    Piece pieces[32]{};
+    // A chessboard has at most one piece per square, including after promotions.
+    Piece pieces[BoardSquares]{};
     std::size_t num_pieces = 0;
 
     int king_square(PieceColor color) const;
     bool is_valid() const noexcept;
+    // Checks only that the position can be represented safely by the feature schema.
+    // It does not check piece overlap or chess legality.
+    bool is_feature_compatible() const noexcept;
 };
+
+using PieceBitboards = std::array<std::uint64_t, PieceColors * PieceTypes>;
+
+// Bitboard order is White Pawn/Knight/Bishop/Rook/Queen/King, then Black.
+// The output is unchanged when the bitboards do not describe a valid position.
+bool position_from_bitboards(const PieceBitboards& bitboards, Position& output) noexcept;
 
 inline bool operator==(const Position& lhs, const Position& rhs) noexcept {
     if (lhs.num_pieces != rhs.num_pieces) return false;
@@ -165,7 +174,7 @@ inline std::size_t decode_pawn_structure_key(PawnStructureKey key,
 }
 
 // Generate full feature set from a position (excluding structural pawns)
-void generate_features(const Position& pos, FeatureSet& out);
+bool generate_features(const Position& pos, FeatureSet& out);
 
 // Compute feature delta between two positions (for incremental update).
 // Structural pawn changes are exposed separately so an accumulator/cache can

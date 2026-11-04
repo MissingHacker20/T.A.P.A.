@@ -6,15 +6,18 @@ namespace TAPA::Accumulator
 {
 
     namespace {
-        AccumulatorValue saturating_accumulator_add(AccumulatorValue current, std::int64_t delta) noexcept
+        AccumulatorValue saturate_accumulator_value(std::int64_t value) noexcept
         {
-            const std::int64_t sum = static_cast<std::int64_t>(current) + delta;
-            return static_cast<AccumulatorValue>(std::clamp<std::int64_t>(sum,
+            return static_cast<AccumulatorValue>(std::clamp<std::int64_t>(value,
                 std::numeric_limits<AccumulatorValue>::min(), std::numeric_limits<AccumulatorValue>::max()));
         }
     }
 
-    void PieceKingAccumulator::reset(AccumulatorValue bias) noexcept { data_.fill(bias); }
+    void PieceKingAccumulator::reset(AccumulatorValue bias) noexcept
+    {
+        exact_data_.fill(bias);
+        data_.fill(bias);
+    }
 
     std::size_t PieceKingAccumulator::slot(const Features::Feature &feature) noexcept
     {
@@ -28,8 +31,8 @@ namespace TAPA::Accumulator
             feature.value < -1 || feature.value > 1) return;
         const auto &row = weights.feature_weights[index];
         for (std::size_t neuron = 0; neuron < data_.size(); ++neuron) {
-            data_[neuron] = saturating_accumulator_add(data_[neuron],
-                static_cast<std::int64_t>(row[neuron]) * feature.value);
+            exact_data_[neuron] += static_cast<std::int64_t>(row[neuron]) * feature.value;
+            data_[neuron] = saturate_accumulator_value(exact_data_[neuron]);
         }
     }
 
@@ -40,8 +43,8 @@ namespace TAPA::Accumulator
             feature.value < -1 || feature.value > 1) return;
         const auto &row = weights.feature_weights[index];
         for (std::size_t neuron = 0; neuron < data_.size(); ++neuron) {
-            data_[neuron] = saturating_accumulator_add(data_[neuron],
-                -static_cast<std::int64_t>(row[neuron]) * feature.value);
+            exact_data_[neuron] -= static_cast<std::int64_t>(row[neuron]) * feature.value;
+            data_[neuron] = saturate_accumulator_value(exact_data_[neuron]);
         }
     }
 

@@ -7,7 +7,9 @@
 #include "../Source Code/Features/move.h"
 #include "../Source Code/Model/model.h"
 #include "../Source Code/Network/network_model.h"
+#include "../Source Code/Training/training.h"
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -47,6 +49,21 @@ namespace TAPA::Tests
                 return ok;
             };
             if (!require(sizeof(PawnStructureKey) == sizeof(std::uint64_t), 1)) return false;
+            PieceBitboards bitboards{};
+            bitboards[static_cast<std::size_t>(PieceColor::White) * PieceTypes +
+                      static_cast<std::size_t>(PieceType::King)] = PawnStructureKey{1} << 4;
+            bitboards[static_cast<std::size_t>(PieceColor::Black) * PieceTypes +
+                      static_cast<std::size_t>(PieceType::King)] = PawnStructureKey{1} << 60;
+            bitboards[static_cast<std::size_t>(PieceColor::White) * PieceTypes +
+                      static_cast<std::size_t>(PieceType::Knight)] = PawnStructureKey{1} << 18;
+            Position bitboard_position{};
+            if (!require(position_from_bitboards(bitboards, bitboard_position) &&
+                bitboard_position.num_pieces == 3 && bitboard_position.is_valid(), 15)) return false;
+            const Position unchanged_position = bitboard_position;
+            bitboards[static_cast<std::size_t>(PieceColor::Black) * PieceTypes +
+                      static_cast<std::size_t>(PieceType::Pawn)] = PawnStructureKey{1} << 4;
+            if (!require(!position_from_bitboards(bitboards, bitboard_position) &&
+                bitboard_position == unchanged_position, 16)) return false;
             if (!check(is_valid_square(0) && is_valid_square(63) && !is_valid_square(64)))
                 return false;
             for (int square = 0; square < 64; ++square)
@@ -173,6 +190,23 @@ namespace TAPA::Tests
             invalid.pieces[0].square = 64;
             if (!require(!invalid.is_valid(), 18))
                 return false;
+            Position non_legal = position;
+            add(non_legal, PieceType::King, PieceColor::White, 4);
+            FeatureSet non_legal_features;
+            if (!require(!non_legal.is_valid() &&
+                non_legal.is_feature_compatible() &&
+                generate_features(non_legal, non_legal_features), 19))
+                return false;
+            Position promoted = kings_only();
+            for (int square = 0; square < BoardSquares; ++square) {
+                if (square == 4 || square == 60) continue;
+                add(promoted, PieceType::Queen, square < 32 ? PieceColor::White : PieceColor::Black, square);
+            }
+            FeatureSet promoted_features;
+            if (!require(promoted.num_pieces == BoardSquares &&
+                generate_features(promoted, promoted_features) &&
+                promoted_features.size == 2 * (BoardSquares - 1), 20))
+                return false;
             return position.is_valid();
         }
 
@@ -245,6 +279,15 @@ namespace TAPA::Tests
             incremental.reconstruct(old_key, weights);
             incremental.update(old_key, new_key, weights);
             if (full.data() != incremental.data()) return false;
+            weights.bias = std::numeric_limits<std::int32_t>::max();
+            weights.bit_weights[0][0] = 1;
+            TAPA::Accumulator::PawnAccumulator saturated, pawn_rebuilt;
+            saturated.reconstruct(PawnStructureKey{1}, weights);
+            saturated.update(PawnStructureKey{1}, 0, weights);
+            pawn_rebuilt.reconstruct(0, weights);
+            if (saturated != pawn_rebuilt || saturated.data() != pawn_rebuilt.data()) return false;
+            weights.bias = 0;
+            weights.bit_weights[0][0] = 0;
             TAPA::Accumulator::PawnAccumulatorCache cache(weights);
             cache.get(new_key);
             if (cache.touch(new_key) == nullptr || cache.stats().hits != 1 || cache.stats().misses != 1) return false;
@@ -443,7 +486,18 @@ namespace TAPA::Tests
             FeatureSet added, removed;
             for (std::size_t i = 0; i < set.size; ++i) added.add(set.features[i]);
             incremental.update(added, removed, weights, PieceColor::White);
-            return full.data() == incremental.data();
+            if (full.data() != incremental.data()) return false;
+
+            weights.bias = std::numeric_limits<std::int32_t>::max();
+            weights.feature_weights[0][0] = 1;
+            FeatureSet saturated_features, no_features;
+            saturated_features.add(Feature{0, 1, PieceColor::White});
+            TAPA::Accumulator::PieceKingAccumulator saturated, piece_rebuilt;
+            saturated.reconstruct(saturated_features, weights, PieceColor::White);
+            removed.add(Feature{0, 1, PieceColor::White});
+            saturated.update({}, removed, weights, PieceColor::White);
+            piece_rebuilt.reconstruct(no_features, weights, PieceColor::White);
+            return saturated.data() == piece_rebuilt.data();
         }
 
         bool move_tests()
@@ -476,6 +530,24 @@ namespace TAPA::Tests
             add(castle_position, PieceType::Rook, PieceColor::White, 7);
             if (!Features::apply_move(castle_position, castling, after)) return false;
             if (after.pieces[0].square != 6 || after.pieces[2].square != 5) return false;
+            Move queenside_castle{};
+            queenside_castle.from = 4;
+            queenside_castle.to = 2;
+            queenside_castle.moving_type = PieceType::King;
+            queenside_castle.color = PieceColor::White;
+            queenside_castle.castling = true;
+            queenside_castle.king_side = false;
+            queenside_castle.rook_from = 0;
+            queenside_castle.rook_to = 3;
+            Position queenside = kings_only();
+            add(queenside, PieceType::Rook, PieceColor::White, 0);
+            if (!Features::apply_move(queenside, queenside_castle, after) ||
+                after.pieces[0].square != 2 || after.pieces[2].square != 3) return false;
+            const FeatureDelta queenside_delta =
+                Features::update_features(queenside, queenside_castle, after);
+            if (!queenside_delta.valid) return false;
+            add(queenside, PieceType::Knight, PieceColor::White, 1);
+            if (Features::apply_move(queenside, queenside_castle, after)) return false;
             return delta.added.size == 2;
         }
 
@@ -751,15 +823,25 @@ namespace TAPA::Tests
             NNUE no_model;
             if (no_model.model_loaded() || no_model.evaluate(kings_only()) != 0 || no_model.evaluate_current() != 0) return false;
             TAPA::Model::Model test_model;
+            test_model.pawn_weights.bias = 3;
+            test_model.piece_weights.bias = 2;
+            test_model.network_weights.layer1.weights[0][0] = 1;
+            test_model.network_weights.layer2.weights[0][0] = 1;
+            test_model.network_weights.output.weights[0][0] = 1;
             NNUE nnue;
             if (!nnue.load_model(test_model)) return false;
+            nnue.initialize(5);
+            if (nnue.evaluate(kings_only()) != 10) return false;
             nnue.initialize(0);
             Position before = kings_only();
             add(before, PieceType::Knight, PieceColor::White, 18);
             const int32_t initial_score = nnue.evaluate(before);
             if (nnue.update(before, before) != NNUE::UpdateStatus::Unchanged ||
-                nnue.update(before, Position{}) != NNUE::UpdateStatus::InvalidPosition) return false;
+                nnue.update(before, Position{}) != NNUE::UpdateStatus::InvalidDelta) return false;
             if (nnue.evaluate(before) != initial_score) return false;
+            Position non_legal = before;
+            add(non_legal, PieceType::King, PieceColor::White, 12);
+            if (non_legal.is_valid() || nnue.evaluate(non_legal) != initial_score) return false;
 
             Position after = before;
             after.pieces[2].square = 21;
@@ -813,13 +895,81 @@ namespace TAPA::Tests
             return cache_consistent;
         }
 
+        bool training_tests()
+        {
+            auto require = [](bool ok, int marker) {
+                if (!ok) std::printf("training_tests: check failed near marker %d\n", marker);
+                return ok;
+            };
+            const std::string start_fen =
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+            Position parsed{};
+            bool white_to_move = false;
+            std::string error;
+            if (!require(Training::parse_fen(start_fen, parsed, &white_to_move, &error) &&
+                parsed.num_pieces == 32 && white_to_move, 1)) return false;
+
+            Training::Example example;
+            if (!require(Training::parse_dataset_line(start_fen + "\t1250", example, &error) &&
+                example.eval_milli == 1250 && example.position == parsed, 2)) return false;
+            if (!require(!Training::parse_dataset_line("not a dataset row", example, &error) &&
+                !error.empty(), 3)) return false;
+            const std::string dataset_path = "tapa_training_test.tsv";
+            {
+                std::ofstream dataset(dataset_path, std::ios::trunc);
+                if (!dataset) return false;
+                dataset << "# FEN and white-relative millipawns\n" << start_fen << "\t1250\n";
+            }
+            std::vector<Training::Example> loaded_examples;
+            const bool dataset_loaded = Training::load_dataset(dataset_path, loaded_examples, &error);
+            std::remove(dataset_path.c_str());
+            if (!require(dataset_loaded && loaded_examples.size() == 1 &&
+                loaded_examples[0].eval_milli == 1250, 7)) return false;
+
+            Position unchanged = kings_only();
+            if (!require(!Training::parse_fen("invalid w - - 0 1", unchanged, nullptr, &error) &&
+                unchanged == kings_only() && !error.empty(), 4)) return false;
+
+            Training::Example constant_target{kings_only(), 1000};
+            Model::Model trained_model;
+            Training::Options options;
+            options.epochs = 1000;
+            options.seed = 7;
+            Training::Report report;
+            const bool trained = Training::train({constant_target}, options, trained_model, &report, &error) &&
+                trained_model.piece_weights.valid() &&
+                trained_model.network_weights.activation_limit > 0 &&
+                std::isfinite(report.initial_mae_milli) && std::isfinite(report.final_mae_milli) &&
+                report.final_mae_milli < report.initial_mae_milli;
+            if (!require(trained, 5)) return false;
+            const std::string trained_model_path = "tapa_trained_test.nnue";
+            if (!TAPA::Model::save(trained_model_path, trained_model, &error)) {
+                std::remove(trained_model_path.c_str());
+                return false;
+            }
+            const TAPA::Model::LoadResult reloaded_model = TAPA::Model::load(trained_model_path);
+            std::remove(trained_model_path.c_str());
+            if (!require(static_cast<bool>(reloaded_model) &&
+                reloaded_model.model.network_weights.activation_limit ==
+                    trained_model.network_weights.activation_limit, 8)) return false;
+            NNUE evaluator;
+            if (!evaluator.load_model(reloaded_model.model, &error)) return false;
+            const std::int32_t trained_score = evaluator.evaluate(kings_only());
+            if (!require(std::abs(static_cast<std::int64_t>(trained_score) - 1000) < 1000, 6)) {
+                std::printf("training_tests: trained score was %d\n", trained_score);
+                return false;
+            }
+            return true;
+        }
+
         bool memory_layout_tests()
         {
             if (sizeof(TAPA::Accumulator::PawnWeights) !=
                 64 * TAPA::Accumulator::PawnNeuronCount * sizeof(TAPA::Accumulator::PawnWeight) +
                 sizeof(TAPA::Accumulator::PawnAccumulatorValue)) return false;
             if (sizeof(TAPA::Accumulator::PawnAccumulator) !=
-                TAPA::Accumulator::PawnNeuronCount * sizeof(TAPA::Accumulator::PawnAccumulatorValue)) return false;
+                TAPA::Accumulator::PawnNeuronCount *
+                    (sizeof(TAPA::Accumulator::PawnAccumulatorValue) + sizeof(std::int64_t))) return false;
             if (TAPA::Accumulator::PawnAccumulatorCache::capacity() != 64) return false;
             std::cout << "sizeof(PawnWeights)=" << sizeof(TAPA::Accumulator::PawnWeights)
                       << " sizeof(PieceWeights struct)=" << sizeof(TAPA::Accumulator::PieceWeights)
@@ -838,6 +988,7 @@ namespace TAPA::Tests
         const bool features_ok = feature_tests();
         const bool accumulator_ok = accumulator_tests();
         const bool nnue_ok = nnue_tests();
+        const bool training_ok = training_tests();
         const bool pawn_ok = pawn_accumulator_tests();
         const bool model_ok = model_tests();
         const bool differential_ok = differential_feature_tests();
@@ -853,6 +1004,8 @@ namespace TAPA::Tests
             std::printf("accumulator tests failed\n");
         if (!nnue_ok)
             std::printf("nnue tests failed\n");
+        if (!training_ok)
+            std::printf("training tests failed\n");
         if (!pawn_ok)
             std::printf("pawn accumulator tests failed\n");
         if (!model_ok)
@@ -872,7 +1025,7 @@ namespace TAPA::Tests
         if (!memory_ok)
             std::printf("memory layout tests failed\n");
         return features_ok && accumulator_ok && nnue_ok && pawn_ok && model_ok && differential_ok &&
-               move_delta_ok && random_sequences_ok && random_keys_ok && piece_ok && move_ok && memory_ok;
+               training_ok && move_delta_ok && random_sequences_ok && random_keys_ok && piece_ok && move_ok && memory_ok;
     }
 }
 
@@ -880,4 +1033,3 @@ int main()
 {
     return TAPA::Tests::run_all_tests() ? 0 : 1;
 }
-

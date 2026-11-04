@@ -1,6 +1,7 @@
 // features.cpp
 #include "features.h"
 #include <algorithm>
+#include <bit>
 
 namespace TAPA {
 namespace Features {
@@ -32,6 +33,41 @@ bool Position::is_valid() const noexcept {
         }
     }
     return kings[0] && kings[1];
+}
+
+bool Position::is_feature_compatible() const noexcept {
+    bool kings[PieceColors] = {false, false};
+    for (std::size_t i = 0; i < num_pieces; ++i) {
+        const Piece& piece = pieces[i];
+        const auto color = static_cast<unsigned int>(piece.color);
+        const auto type = static_cast<unsigned int>(piece.type);
+        if (!is_valid_square(piece.square) || color >= PieceColors || type >= PieceTypes) return false;
+        if (piece.type == PieceType::King) kings[color] = true;
+    }
+    return kings[0] && kings[1];
+}
+
+bool position_from_bitboards(const PieceBitboards& bitboards, Position& output) noexcept {
+    Position candidate{};
+    std::uint64_t occupied = 0;
+    for (int color = 0; color < PieceColors; ++color) {
+        for (int type = 0; type < PieceTypes; ++type) {
+            std::uint64_t squares = bitboards[static_cast<std::size_t>(color * PieceTypes + type)];
+            if ((occupied & squares) != 0) return false;
+            occupied |= squares;
+            while (squares != 0) {
+                if (candidate.num_pieces >= std::size(candidate.pieces)) return false;
+                const int square = static_cast<int>(std::countr_zero(squares));
+                candidate.pieces[candidate.num_pieces++] = {
+                    static_cast<PieceType>(type), static_cast<PieceColor>(color), square
+                };
+                squares &= squares - 1;
+            }
+        }
+    }
+    if (!candidate.is_valid()) return false;
+    output = candidate;
+    return true;
 }
 
 bool FeatureSet::add(const Feature& f) {
@@ -70,50 +106,40 @@ bool FeatureSet::remove(const Feature& feature) {
     return false;
 }
 
-void generate_features(const Position& pos, FeatureSet& out) {
+bool generate_features(const Position& pos, FeatureSet& out) {
     out.clear();
-    if (!pos.is_valid()) return;
-    constexpr std::size_t MaxGeneratedFeatures = MaxFeatures;
-    static_assert(MaxGeneratedFeatures == MaxFeatures);
-    std::array<Feature, MaxGeneratedFeatures> canonical{};
+    if (!pos.is_feature_compatible()) return false;
+    std::array<Feature, MaxFeatures> canonical{};
     std::size_t count = 0;
+    const int king_squares[PieceColors] = {
+        pos.king_square(PieceColor::White), pos.king_square(PieceColor::Black)
+    };
     for (int perspective_value = 0; perspective_value < PieceColors; ++perspective_value) {
         const auto perspective = static_cast<PieceColor>(perspective_value);
-        const int king_square = pos.king_square(perspective);
         for (std::size_t i = 0; i < pos.num_pieces; ++i) {
             const Piece& piece = pos.pieces[i];
             if (piece.type == PieceType::King && piece.color == perspective) continue;
             if (piece.type == PieceType::Pawn && is_structural_pawn(piece.color, piece.square)) continue;
-            if (count >= canonical.size()) { out.clear(); return; }
-            canonical[count++] = Feature{encode_index(king_square, static_cast<int>(piece.color),
+            canonical[count++] = Feature{encode_index(king_squares[perspective_value], static_cast<int>(piece.color),
                 static_cast<int>(piece.type), piece.square), 1, perspective};
         }
     }
-    if (count > MaxFeatures) return;
     std::sort(canonical.begin(), canonical.begin() + count, [](const Feature& lhs, const Feature& rhs) {
         if (lhs.index != rhs.index) return lhs.index < rhs.index;
         return static_cast<unsigned int>(lhs.perspective) < static_cast<unsigned int>(rhs.perspective);
     });
-    for (std::size_t i = 0; i < count; ++i)
-        if (!out.add(canonical[i])) {
-            out.clear();
-            return;
-        }
+    std::copy_n(canonical.begin(), count, out.features.begin());
+    out.size = count;
+    return true;
 }
 
 FeatureDelta update_features(const Position& previous, const Position& current) {
     FeatureDelta delta;
-    if (!previous.is_valid() || !current.is_valid()) return delta;
     FeatureSet prev_set, curr_set;
-    generate_features(previous, prev_set);
-    generate_features(current, curr_set);
-    if ((prev_set.size == 0 && previous.num_pieces > 2) ||
-        (curr_set.size == 0 && current.num_pieces > 2)) return delta;
+    if (!generate_features(previous, prev_set) || !generate_features(current, curr_set)) return delta;
 
     delta.previous_pawn_structure = compute_pawn_structure_key(previous);
     delta.current_pawn_structure = compute_pawn_structure_key(current);
-    if (prev_set.size > MaxFeatures || curr_set.size > MaxFeatures) return FeatureDelta{};
-
     // Feature indices are canonical and bounded by the encoder. A sorted
     // merge gives linear delta construction without allocating a map.
     auto by_key = [](const Feature& lhs, const Feature& rhs) {
