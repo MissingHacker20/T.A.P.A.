@@ -62,6 +62,15 @@ namespace TAPA::Accumulator
         static constexpr std::size_t capacity() noexcept { return Capacity; }
         bool contains(Features::PawnStructureKey key) const noexcept;
 
+        // Counter semantics:
+        //   hits      — lookups (get() or touch()) that found a valid entry;
+        //   misses    — lookups that did NOT find the key. touch() misses are
+        //               counted here immediately; get() also misses+
+        //               reconstructs and inserts on a miss.
+        //   insertions— every call to insert(), including misses handled by
+        //               get(); not incremented by hits.
+        // touch() does NOT itself insert; the incremental path inserts the
+        // reconstructed accumulator explicitly after a touch() miss.
     private:
         struct Entry
         {

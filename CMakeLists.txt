@@ -38,6 +38,23 @@ target_compile_options(tapa_nnue PRIVATE
 find_package(Threads REQUIRED)
 target_link_libraries(tapa_nnue PUBLIC Threads::Threads)
 
+# Optional sanitizer instrumentation used by CI (TAPA_SANITIZE=ON).
+option(TAPA_SANITIZE "Enable AddressSanitizer + UndefinedBehaviorSanitizer" OFF)
+if(TAPA_SANITIZE AND NOT MSVC)
+    target_compile_options(tapa_nnue PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(tapa_nnue PUBLIC -fsanitize=address,undefined)
+    foreach(tapa_test_target tapa_train tapa_tests tapa_network_tests)
+        if(TARGET ${tapa_test_target})
+            target_compile_options(${tapa_test_target} PRIVATE -fsanitize=address,undefined)
+            target_link_options(${tapa_test_target} PRIVATE -fsanitize=address,undefined)
+        endif()
+    endforeach()
+    if(TARGET tapa_benchmarks)
+        target_compile_options(tapa_benchmarks PRIVATE -fsanitize=address,undefined)
+        target_link_options(tapa_benchmarks PRIVATE -fsanitize=address,undefined)
+    endif()
+endif()
+
 add_executable(tapa_train "Training/train.cpp")
 target_link_libraries(tapa_train PRIVATE tapa_nnue)
 

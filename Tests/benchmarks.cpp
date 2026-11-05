@@ -11,6 +11,7 @@
 #include <iostream>
 #include <array>
 #include <algorithm>
+#include <atomic>
 #include <thread>
 #include <vector>
 
@@ -18,7 +19,8 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t Iterations = 20000;
 constexpr std::size_t BenchmarkRepeats = 7;
-volatile std::int64_t benchmark_sink = 0;
+std::atomic<std::int64_t> benchmark_sink{0};
+std::atomic<bool> benchmark_failure{false};
 
 struct TimingSummary { long long median_us = 0; long long min_us = 0; long long max_us = 0; };
 
@@ -57,6 +59,66 @@ TAPA::Features::PawnStructureKey benchmark_key(std::size_t index) {
     const auto value = static_cast<TAPA::Features::PawnStructureKey>(index + 1);
     const auto other = static_cast<TAPA::Features::PawnStructureKey>(index * 17 + 3);
     return (value * 0x9e3779b97f4a7c15ULL) ^ (other << 32);
+}
+
+// Fill a default model with small deterministic non-zero values so NNUE
+// evaluations return real numbers instead of a constant zero.
+void fill_benchmark_model(TAPA::Model::Model& model) {
+    using namespace TAPA::Accumulator;
+    model.pawn_weights.bias = 7;
+    model.piece_weights.bias = -5;
+    for (std::size_t bit = 0; bit < 64; ++bit)
+        for (std::size_t neuron = 0; neuron < PawnNeuronCount; ++neuron)
+            model.pawn_weights.bit_weights[bit][neuron] =
+                static_cast<PawnWeight>(static_cast<int>((bit * 31 + neuron * 7) % 11) - 5);
+    for (std::size_t feature = 0; feature < PieceFeatureCount; ++feature)
+        for (std::size_t neuron = 0; neuron < NeuronCount; ++neuron)
+            model.piece_weights.feature_weights[feature][neuron] =
+                static_cast<PieceWeight>(static_cast<int>((feature * 13 + neuron * 3) % 9) - 4);
+    auto& layer1 = model.network_weights.layer1;
+    std::size_t value_index = 0;
+    for (auto& row : layer1.weights)
+        for (auto& value : row) value = static_cast<std::int32_t>(value_index++ % 7) - 3;
+    value_index = 0;
+    for (auto& value : layer1.bias) value = static_cast<std::int32_t>(value_index++ % 5) - 2;
+    auto& layer2 = model.network_weights.layer2;
+    value_index = 0;
+    for (auto& row : layer2.weights)
+        for (auto& value : row) value = static_cast<std::int32_t>(value_index++ % 7) - 3;
+    value_index = 0;
+    for (auto& value : layer2.bias) value = static_cast<std::int32_t>(value_index++ % 5) - 2;
+    auto& output = model.network_weights.output;
+    for (auto& row : output.weights)
+        for (auto& value : row) value = 64;
+    output.bias[0] = 3;
+    model.network_weights.activation_limit = 32767;
+}
+
+bool same_feature_set(const TAPA::Features::FeatureSet& lhs,
+                      const TAPA::Features::FeatureSet& rhs) {
+    if (lhs.size != rhs.size) return false;
+    for (std::size_t i = 0; i < lhs.size; ++i) {
+        bool found = false;
+        for (std::size_t j = 0; j < rhs.size; ++j) {
+            const auto& left = lhs.features[i];
+            const auto& right = rhs.features[j];
+            if (left.index == right.index && left.value == right.value &&
+                left.perspective == right.perspective) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+bool same_delta(const TAPA::Features::FeatureDelta& lhs,
+                const TAPA::Features::FeatureDelta& rhs) {
+    return lhs.valid && rhs.valid &&
+        lhs.previous_pawn_structure == rhs.previous_pawn_structure &&
+        lhs.current_pawn_structure == rhs.current_pawn_structure &&
+        same_feature_set(lhs.added, rhs.added) && same_feature_set(lhs.removed, rhs.removed);
 }
 }
 
@@ -148,15 +210,18 @@ int main() {
             piece_accumulator.update(empty_features, features, piece_weights, PieceColor::White);
         }
     });
-    const FeatureDelta representative_delta = update_features(position, knight_move, moved_position);
+    const FeatureDelta full_delta = update_features(position, moved_position);
+    const FeatureDelta move_delta = update_features(position, knight_move, moved_position);
+    if (!same_delta(full_delta, move_delta)) {
+        std::cerr << "ERROR: full-position and move-based feature deltas differ\n";
+        return 1;
+    }
+    const FeatureDelta representative_delta = move_delta;
+    // Compare full reconstruction against the move-descriptor incremental path.
     const auto full_delta_us = measure_us([&] {
         for (std::size_t i = 0; i < Iterations; ++i) {
             benchmark_sink += static_cast<std::int64_t>(update_features(position, moved_position).added.size);
         }
-    });
-    const auto delta_us = measure_us([&] {
-        for (std::size_t i = 0; i < Iterations; ++i)
-            benchmark_sink += static_cast<std::int64_t>(update_features(position, moved_position).added.size);
     });
     const auto piece_delta_update_us = measure_us([&] {
         for (std::size_t i = 0; i < Iterations; ++i) {
@@ -176,27 +241,72 @@ int main() {
     });
 
     TAPA::Model::Model benchmark_model;
+    fill_benchmark_model(benchmark_model);
     std::shared_ptr<const TAPA::NNUEModel> shared_model = std::make_shared<const TAPA::NNUEModel>(benchmark_model);
     TAPA::NNUE nnue;
-    (void)nnue.load_model(shared_model);
+    if (!nnue.load_model(shared_model)) {
+        std::cerr << "ERROR: failed to load benchmark model\n";
+        return 1;
+    }
     nnue.initialize(0);
+    if (nnue.evaluate(position) == 0) {
+        std::cerr << "ERROR: benchmark model produced a zero evaluation\n";
+        return 1;
+    }
     const auto nnue_us = measure_us([&] {
         for (std::size_t i = 0; i < Iterations; ++i)
             benchmark_sink += nnue.evaluate(position);
     });
-    (void)nnue.evaluate(position);
     const auto evaluate_current_us = measure_us([&] {
         for (std::size_t i = 0; i < Iterations; ++i)
             benchmark_sink += nnue.evaluate_current();
     });
+    // #7: correct reversed move descriptor for the backward update; status of
+    // each update is verified and the benchmark aborts on failure.
+    const Move knight_move_back{33, 18, PieceType::Knight, PieceColor::White};
     Position updated_position{};
     const bool update_possible = apply_move(position, knight_move, updated_position);
-    const auto nnue_incremental_us = update_possible ? measure_us([&] {
-        for (std::size_t i = 0; i < Iterations; ++i) {
-            nnue.update(position, knight_move, updated_position);
-            nnue.update(updated_position, knight_move, position);
+    bool roundtrip_verified = false;
+    if (update_possible) {
+        TAPA::NNUE verify;
+        if (verify.load_model(shared_model)) {
+            verify.initialize(0);
+            verify.evaluate(position);
+            const std::int32_t base_score = verify.evaluate_current();
+            const bool forward_ok =
+                verify.update(position, knight_move, updated_position) == TAPA::NNUE::UpdateStatus::Updated;
+            const bool back_ok =
+                verify.update(updated_position, knight_move_back, position) == TAPA::NNUE::UpdateStatus::Updated;
+            // After a forward+backward pair the state must return to the
+            // starting position and reproduce the full reconstruction score.
+            TAPA::NNUE reference;
+            if (reference.load_model(shared_model)) {
+                reference.initialize(0);
+                reference.evaluate(position);
+                roundtrip_verified = forward_ok && back_ok &&
+                    verify.evaluate_current() == reference.evaluate_current() &&
+                    verify.evaluate_current() == base_score;
+            }
         }
-    }) : 0;
+    }
+    if (!roundtrip_verified) {
+        std::cerr << "ERROR: incremental update round-trip failed verification\n";
+        return 1;
+    }
+    const auto nnue_incremental_us = measure_us([&] {
+        for (std::size_t i = 0; i < Iterations; ++i) {
+            if (nnue.update(position, knight_move, updated_position) != TAPA::NNUE::UpdateStatus::Updated ||
+                nnue.update(updated_position, knight_move_back, position) != TAPA::NNUE::UpdateStatus::Updated) {
+                benchmark_failure.store(true, std::memory_order_relaxed);
+                break;
+            }
+            benchmark_sink += nnue.evaluate_current();
+        }
+    });
+    if (benchmark_failure.load(std::memory_order_relaxed)) {
+        std::cerr << "ERROR: incremental update failed during measurement\n";
+        return 1;
+    }
     const auto forward_only = measure_repeated([&] {
         for (std::size_t i = 0; i < Iterations; ++i)
             benchmark_sink += network.forward_pass(white, black);
@@ -210,18 +320,37 @@ int main() {
             benchmark_sink += nnue.evaluate_current();
     });
     std::vector<long long> worker_times;
+    benchmark_failure.store(false, std::memory_order_relaxed);
     for (std::size_t worker_count : {1u, 2u, 4u}) {
         std::vector<std::thread> workers;
         const auto elapsed = measure_us([&] {
             for (std::size_t worker = 0; worker < worker_count; ++worker)
                 workers.emplace_back([&] {
+                    // Each worker owns its own NNUE state and cache but shares
+                    // one immutable model.
                     TAPA::NNUE local;
+                    if (!local.load_model(shared_model)) {
+                        benchmark_failure.store(true, std::memory_order_relaxed);
+                        return;
+                    }
+                    local.initialize(0);
+                    const std::int64_t sample = local.evaluate(position);
+                    if (sample == 0) {
+                        benchmark_failure.store(true, std::memory_order_relaxed);
+                        return;
+                    }
+                    std::int64_t worker_sink = sample;
                     for (std::size_t i = 0; i < Iterations / worker_count; ++i)
-                        benchmark_sink += local.evaluate(position);
+                        worker_sink += local.evaluate(position);
+                    benchmark_sink.fetch_add(worker_sink, std::memory_order_relaxed);
                 });
             for (auto& worker : workers) worker.join();
         });
         worker_times.push_back(elapsed);
+    }
+    if (benchmark_failure.load(std::memory_order_relaxed)) {
+        std::cerr << "ERROR: one or more NNUE benchmark workers failed to evaluate\n";
+        return 1;
     }
 
     const auto hit_stats = hit_cache.stats();
@@ -234,13 +363,12 @@ int main() {
               << "pawn_cache_hit_us=" << cache_hit_us << " hits=" << hit_stats.hits << " misses=" << hit_stats.misses << '\n'
               << "pawn_cache_miss_us=" << cache_miss_us << " hits=" << miss_cache.stats().hits << " misses=" << miss_cache.stats().misses << '\n'
               << "workers_1_2_4_elapsed_us=" << worker_times[0] << '/' << worker_times[1] << '/' << worker_times[2] << '\n'
-              << "full_position_delta_us=" << full_delta_us << '\n'
               << "features_reconstruction_us=" << feature_us << '\n'
               << "pawn_incremental_us=" << incremental_us << '\n'
               << "piece_reconstruction_us=" << piece_reconstruct_us << '\n'
               << "piece_incremental_us=" << piece_update_us << '\n'
-              << "full_feature_delta_comparison_us=" << delta_us << '\n'
-              << "move_incremental_feature_delta_us=" << incremental_delta_us << '\n'
+              << "full_position_delta_us=" << full_delta_us << '\n'
+              << "move_based_feature_delta_us=" << incremental_delta_us << '\n'
               << "piece_move_delta_incremental_roundtrip_us=" << piece_delta_update_us << '\n'
               << "pawn_cache_hit_miss_pair_us=" << cache_hit_plus_miss_us << '\n'
               << "sizeof(PawnStructureKey)=" << sizeof(PawnStructureKey)
@@ -253,12 +381,12 @@ int main() {
               << " sizeof(Accumulator)=" << sizeof(Accumulator)
               << " sizeof(NNUE)=" << sizeof(TAPA::NNUE)
               << " nnue_worker_state_bytes=" << nnue.worker_state_bytes()
-              << " nnue_owned_weight_estimate_bytes=" << nnue.owned_weight_bytes()
+              << " nnue_owned_weight_bytes=" << nnue.owned_weight_bytes()
               << " nnue_shared_model_bytes=" << TAPA::NNUE::model_bytes(*shared_model)
               << " network_weights_bytes=" << sizeof(TAPA::Network::NetworkWeights)
               << " nnue_feature_weights_bytes=" << TAPA::NNUE::weights_bytes()
               << " nnue_cache_bytes=" << nnue.pawn_cache_bytes()
               << " cache_entry_bytes=" << TAPA::NNUE::cache_entry_bytes()
-              << " sink=" << benchmark_sink << '\n';
+              << " sink=" << benchmark_sink.load(std::memory_order_relaxed) << '\n';
     return 0;
 }

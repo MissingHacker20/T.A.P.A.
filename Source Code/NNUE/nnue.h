@@ -58,6 +58,7 @@ public:
     std::size_t pawn_cache_bytes() const noexcept;
     std::size_t worker_state_bytes() const noexcept;
     static std::size_t weights_bytes() noexcept;
+    // Returns the model allocation only when this instance is its sole owner.
     std::size_t owned_weight_bytes() const noexcept;
     static std::size_t model_bytes(const NNUEModel& model) noexcept;
     static std::size_t cache_entry_bytes() noexcept;

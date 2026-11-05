@@ -39,10 +39,14 @@ Build and run:
 
 ```text
 cmake --build build --config Release --target tapa_train
-build/tapa_train training.tsv model.nnue [epochs] [learning-rate]
+build/tapa_train training.tsv model.nnue --epochs 10 --learning-rate 0.001 --seed 42 --validation-fraction 0.2
 ```
 
-Defaults are 10 epochs and learning rate `0.001`; the trainer uses Huber-loss SGD, reports training MAE before/after, and quantizes the learned parameters to the existing integer model format. This initial trainer does not split a validation set or provide a game-outcome objective, so reserve separate positions for validation when measuring generalization. A loaded model can be evaluated through the same `NNUE::load_model()` API used by the engine.
+Defaults are 10 epochs, learning rate `0.001`, seed `0x54415041`, and a deterministic 20% validation split. The trainer uses Huber-loss SGD, reports separate train/validation MAE after each epoch, and exports the best validation checkpoint. Small datasets that cannot provide a validation row are rejected unless validation is explicitly disabled with `--validation-fraction 0`. A dedicated validation dataset can be supplied with `--validation-file validation.tsv`; those examples are never used for weight updates.
+
+Training checkpoints are separate from inference models. Save and resume them with `--checkpoint-out run.chk` and `--checkpoint-in run.chk`; resume with a larger total epoch count to continue training. The seed, learning rate, validation split, and dataset contents must match the checkpoint. The trainer also compares quantized training predictions with NNUE inference and reloads the saved model to verify prediction parity.
+
+Legacy positional options remain accepted: `[epochs] [learning-rate] [checkpoint-in] [checkpoint-out]`. A loaded model can be evaluated through the same `NNUE::load_model()` API used by the engine.
 
 To generate labeled examples with the MissingPawn engine, put one FEN per line in a text file and run:
 

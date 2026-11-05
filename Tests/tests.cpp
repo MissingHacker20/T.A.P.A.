@@ -207,6 +207,30 @@ namespace TAPA::Tests
                 generate_features(promoted, promoted_features) &&
                 promoted_features.size == 2 * (BoardSquares - 1), 20))
                 return false;
+
+            // TODO #1: num_pieces == 64 must be handled; 65 must be rejected
+            // before any out-of-bounds read (acceptance criteria).
+            Position full64 = kings_only();
+            for (int square = 0; square < BoardSquares; ++square) {
+                if (square == 4 || square == 60) continue;
+                add(full64, PieceType::Rook, square < 32 ? PieceColor::White : PieceColor::Black, square);
+            }
+            if (!require(full64.num_pieces == 64 && full64.king_square(PieceColor::White) == 4 &&
+                full64.king_square(PieceColor::Black) == 60 &&
+                full64.is_feature_compatible(), 21)) return false;
+            Position corrupt65 = full64;
+            corrupt65.num_pieces = 65; // simulate a wrongly constructed object
+            if (!require(!corrupt65.is_feature_compatible() &&
+                corrupt65.king_square(PieceColor::White) == 4, 22)) return false;
+            FeatureSet corrupt_features;
+            if (!require(!generate_features(corrupt65, corrupt_features) && corrupt_features.size == 0, 23))
+                return false;
+            corrupt_features.clear();
+            FeatureSet corrupt_delta_added;
+            const FeatureDelta corrupt_delta = update_features(corrupt65, full64);
+            if (!require(!corrupt_delta.valid, 24)) return false;
+            const Position corrupt_equal = corrupt65;
+            if (!require(corrupt65 == corrupt_equal && corrupt65 != full64, 25)) return false;
             return position.is_valid();
         }
 
@@ -348,12 +372,25 @@ namespace TAPA::Tests
             NNUE loaded_nnue;
             if (!loaded_nnue.load_model(loaded.model)) { std::remove(path.c_str()); std::remove(load_path.c_str()); return fail(8); }
             loaded_nnue.initialize(0);
-            if (!loaded_nnue.model_loaded() || loaded_nnue.evaluate_current() != 0) { std::remove(path.c_str()); return fail(9); }
+            if (!loaded_nnue.model_loaded() || loaded_nnue.evaluate_current() != 0 ||
+                loaded_nnue.owned_weight_bytes() == 0) { std::remove(path.c_str()); return fail(9); }
+            Position oversized = kings_only();
+            for (int square = 0; square < BoardSquares; ++square)
+                if (square != 4 && square != 60)
+                    add(oversized, PieceType::Rook,
+                        square < 32 ? PieceColor::White : PieceColor::Black, square);
+            oversized.num_pieces = 65;
+            if (loaded_nnue.evaluate(oversized) != 0 || loaded_nnue.evaluate_current() != 0) {
+                std::remove(path.c_str()); return fail(18);
+            }
             NNUE shared_first, shared_second;
             std::shared_ptr<const TAPA::NNUEModel> shared_model;
             try { shared_model = std::make_shared<const TAPA::NNUEModel>(loaded.model); }
             catch (...) { std::remove(path.c_str()); return fail(10); }
-            if (!shared_first.load_model(shared_model) || !shared_second.load_model(shared_model)) { std::remove(path.c_str()); return fail(11); }
+            if (!shared_first.load_model(shared_model) || !shared_second.load_model(shared_model) ||
+                shared_first.owned_weight_bytes() != 0 || shared_second.owned_weight_bytes() != 0) {
+                std::remove(path.c_str()); return fail(11);
+            }
             Position shared_start = kings_only();
             add(shared_start, PieceType::Knight, PieceColor::White, 18);
             const auto initial_first = shared_first.evaluate(shared_start);
@@ -888,9 +925,12 @@ namespace TAPA::Tests
             const auto misses_after = nnue.pawn_cache_stats().misses;
             const auto hits_after = nnue.pawn_cache_stats().hits;
             const int repeated_score = reconstructed.evaluate(repeat_after);
-            const bool cache_consistent = nnue.evaluate_current() == repeated_score && misses_after == misses_before &&
-                hits_after == hits_before && nnue.pawn_cache_insertions() == insertions_before + 1;
-            if (!cache_consistent) std::printf("nnue: cache current=%d reconstructed=%d misses=%zu/%zu hits=%zu\\n",
+            // With touch() misses counted in the stats, the incremental path
+            // that has not seen this pawn key yet records miss + insertion.
+            const bool cache_consistent = nnue.evaluate_current() == repeated_score &&
+                misses_after == misses_before + 1 && hits_after == hits_before &&
+                nnue.pawn_cache_insertions() == insertions_before + 1;
+            if (!cache_consistent) std::printf("nnue: cache current=%d reconstructed=%d misses=%zu/%zu hits=%zu\n",
                 nnue.evaluate_current(), repeated_score, misses_before, misses_after, hits_after);
             return cache_consistent;
         }
@@ -925,6 +965,25 @@ namespace TAPA::Tests
             std::remove(dataset_path.c_str());
             if (!require(dataset_loaded && loaded_examples.size() == 1 &&
                 loaded_examples[0].eval_milli == 1250, 7)) return false;
+            const std::string validation_dataset_path = "tapa_validation_test.tsv";
+            {
+                std::ofstream validation_dataset(validation_dataset_path, std::ios::trunc);
+                if (!validation_dataset) return false;
+                validation_dataset << "4k3/8/8/8/8/8/8/4K3 w - - 0 1\t0\n";
+            }
+            Training::Options external_validation_options;
+            external_validation_options.epochs = 2;
+            external_validation_options.seed = 13;
+            external_validation_options.validation_path = validation_dataset_path;
+            Model::Model external_validation_model;
+            Training::Report external_validation_report;
+            const bool external_validation_ok = Training::train(loaded_examples,
+                external_validation_options, external_validation_model,
+                &external_validation_report, &error);
+            std::remove(validation_dataset_path.c_str());
+            if (!require(external_validation_ok &&
+                external_validation_report.training_examples == 1 &&
+                external_validation_report.validation_examples == 1, 11)) return false;
 
             Position unchanged = kings_only();
             if (!require(!Training::parse_fen("invalid w - - 0 1", unchanged, nullptr, &error) &&
@@ -935,11 +994,13 @@ namespace TAPA::Tests
             Training::Options options;
             options.epochs = 1000;
             options.seed = 7;
+            options.validation_fraction = 0.0;
             Training::Report report;
             const bool trained = Training::train({constant_target}, options, trained_model, &report, &error) &&
                 trained_model.piece_weights.valid() &&
                 trained_model.network_weights.activation_limit > 0 &&
                 std::isfinite(report.initial_mae_milli) && std::isfinite(report.final_mae_milli) &&
+                report.max_export_prediction_error_milli <= 1.0f &&
                 report.final_mae_milli < report.initial_mae_milli;
             if (!require(trained, 5)) return false;
             const std::string trained_model_path = "tapa_trained_test.nnue";
@@ -959,6 +1020,446 @@ namespace TAPA::Tests
                 std::printf("training_tests: trained score was %d\n", trained_score);
                 return false;
             }
+
+            // --- TODO #5: multi-position training regression -------------------
+            // Several clearly distinct positions with controlled targets.
+            // Verifies that the network learns to separate positions and that
+            // the full export/save/load/inference round-trip works.
+            std::vector<Training::Example> spread = {
+                {kings_only(), 0},
+                {[] { Position p = kings_only(); add(p, PieceType::Queen, PieceColor::White, 27); return p; }(), 2000},
+                {[] { Position p = kings_only(); add(p, PieceType::Queen, PieceColor::Black, 27); return p; }(), -2000},
+                {[] { Position p = kings_only();
+                      add(p, PieceType::Pawn, PieceColor::White, 12);
+                      add(p, PieceType::Pawn, PieceColor::White, 13);
+                      add(p, PieceType::Pawn, PieceColor::White, 14);
+                      add(p, PieceType::Pawn, PieceColor::White, 15);
+                      return p; }(), 1500},
+                {[] { Position p = kings_only();
+                      add(p, PieceType::Pawn, PieceColor::Black, 52);
+                      add(p, PieceType::Pawn, PieceColor::Black, 51);
+                      add(p, PieceType::Pawn, PieceColor::Black, 50);
+                      add(p, PieceType::Pawn, PieceColor::Black, 49);
+                      return p; }(), -1500},
+                {[] { Position p = kings_only();
+                      add(p, PieceType::Rook, PieceColor::White, 0);
+                      add(p, PieceType::Bishop, PieceColor::White, 2);
+                      add(p, PieceType::Knight, PieceColor::White, 6);
+                      return p; }(), 800},
+                {[] { Position p = kings_only();
+                      add(p, PieceType::Rook, PieceColor::Black, 56);
+                      add(p, PieceType::Bishop, PieceColor::Black, 58);
+                      add(p, PieceType::Knight, PieceColor::Black, 62);
+                      return p; }(), -800},
+            };
+            for (const Training::Example& e : spread)
+                if (!require(e.position.is_valid(), 20)) return false;
+
+            Training::Options spread_options;
+            spread_options.epochs = 400;
+            spread_options.seed = 42;
+            spread_options.learning_rate = 0.01f;
+            spread_options.validation_fraction = 0.0; // tiny dataset: no split
+            Model::Model spread_model;
+            Training::Report spread_report;
+            if (!require(Training::train(spread, spread_options, spread_model, &spread_report, &error), 21)) {
+                std::printf("training_tests: spread training failed: %s\n", error.c_str());
+                return false;
+            }
+            if (!require(spread_report.saturated_parameters == 0 &&
+                spread_report.max_export_prediction_error_milli <= 1.0f, 22)) return false;
+
+            const std::string spread_model_path = "tapa_spread_test.nnue";
+            if (!TAPA::Model::save(spread_model_path, spread_model, &error)) {
+                std::remove(spread_model_path.c_str());
+                return false;
+            }
+            const TAPA::Model::LoadResult spread_loaded = TAPA::Model::load(spread_model_path);
+            std::remove(spread_model_path.c_str());
+            if (!require(static_cast<bool>(spread_loaded), 23)) return false;
+            NNUE spread_evaluator;
+            if (!spread_evaluator.load_model(spread_loaded.model, &error)) return false;
+            spread_evaluator.initialize(0);
+
+            // Check that the network ranks signed target groups correctly and
+            // the error is much sharper than the original < 1000 bound.
+            std::int64_t max_error = 0;
+            for (const Training::Example& e : spread) {
+                const std::int32_t score = spread_evaluator.evaluate(e.position);
+                const std::int64_t error_milli = std::abs(static_cast<std::int64_t>(score) - e.eval_milli);
+                max_error = std::max<std::int64_t>(max_error, error_milli);
+            }
+            if (max_error >= 600)
+                std::printf("training_tests: spread max error %lld mP\n", (long long)max_error);
+            if (!require(max_error < 600, 26)) return false;
+            // White material advantage must score above the black mirror.
+            const std::int32_t white_queen = spread_evaluator.evaluate(spread[1].position);
+            const std::int32_t black_queen = spread_evaluator.evaluate(spread[2].position);
+            if (!require(white_queen > black_queen, 24)) return false;
+            // Same for pawn chains.
+            const std::int32_t white_pawns = spread_evaluator.evaluate(spread[3].position);
+            const std::int32_t black_pawns = spread_evaluator.evaluate(spread[4].position);
+            if (!require(white_pawns > black_pawns, 25)) return false;
+            return true;
+        }
+
+        // TODO #10: differential extreme-value tests for the production
+        // accumulators: weights near the int16_t bounds, huge int32_t bias and
+        // long add/remove sequences compared against full reconstruction.
+        bool extreme_accumulator_tests()
+        {
+            std::mt19937 generator(0xE8A7C0DEu);
+            constexpr std::int16_t w_min = std::numeric_limits<std::int16_t>::min();
+            constexpr std::int16_t w_max = std::numeric_limits<std::int16_t>::max();
+
+            // Pawn accumulator: near-boundary weights and int32 bias.
+            {
+                TAPA::Accumulator::PawnWeights weights;
+                weights.bias = 2147480000;
+                for (std::size_t bit = 0; bit < 64; ++bit)
+                    for (std::size_t neuron = 0; neuron < TAPA::Accumulator::PawnNeuronCount; ++neuron)
+                        weights.bit_weights[bit][neuron] =
+                            (neuron % 2 == 0) ? w_max : w_min;
+                const PawnStructureKey base = 0x0123456789ABCDEFULL;
+                PawnStructureKey key = base;
+                TAPA::Accumulator::PawnAccumulator incremental, reference;
+                incremental.reconstruct(key, weights);
+                for (int step = 0; step < 400; ++step) {
+                    const std::size_t bit = generator() % 64;
+                    const PawnStructureKey previous_key = key;
+                    key ^= (PawnStructureKey{1} << bit);
+                    incremental.update(previous_key, key, weights);
+                    reference.reconstruct(key, weights);
+                    if (incremental != reference || incremental.data() != reference.data()) {
+                        std::printf("extreme: pawn differential mismatch at step %d\n", step);
+                        return false;
+                    }
+                }
+                // Saturated int32 values must return to range after opposing
+                // updates. Weights stay constant across the whole comparison:
+                // the differential test is only meaningful for key transitions.
+                weights.bias = std::numeric_limits<std::int32_t>::max();
+                weights.bit_weights[0][0] = w_max;
+                weights.bit_weights[1][0] = w_min;
+                TAPA::Accumulator::PawnAccumulator saturated;
+                saturated.reconstruct(PawnStructureKey{1}, weights); // saturates to INT32_MAX
+                saturated.update(PawnStructureKey{1}, 0, weights);
+                TAPA::Accumulator::PawnAccumulator rebuilt;
+                rebuilt.reconstruct(0, weights);
+                if (saturated != rebuilt || saturated.data() != rebuilt.data()) {
+                    std::printf("extreme: pawn saturation round-trip mismatch\n");
+                    return false;
+                }
+                // Negative saturation direction, same constant weights.
+                weights.bias = std::numeric_limits<std::int32_t>::min();
+                TAPA::Accumulator::PawnAccumulator negative_saturated;
+                negative_saturated.reconstruct(PawnStructureKey{1} << 1, weights); // w_min saturates low
+                negative_saturated.update(PawnStructureKey{1} << 1, 0, weights);
+                TAPA::Accumulator::PawnAccumulator negative_rebuilt;
+                negative_rebuilt.reconstruct(0, weights);
+                if (negative_saturated != negative_rebuilt ||
+                    negative_saturated.data() != negative_rebuilt.data()) {
+                    std::printf("extreme: pawn negative saturation mismatch\n");
+                    return false;
+                }
+            }
+
+            // PieceKing accumulator: long add/remove sequence with extremes.
+            {
+                TAPA::Accumulator::PieceWeights weights;
+                weights.bias = -2147480000;
+                for (std::size_t index = 0; index < weights.feature_weights.size(); ++index)
+                    for (std::size_t neuron = 0; neuron < TAPA::Accumulator::NeuronCount; ++neuron)
+                        weights.feature_weights[index][neuron] =
+                            ((neuron + index) % 2 == 0) ? w_max : w_min;
+                TAPA::Accumulator::PieceKingAccumulator incremental, reference;
+                TAPA::Accumulator::PieceKingAccumulator incremental_black, reference_black;
+                Features::FeatureSet active;
+                Features::FeatureSet active_black;
+                incremental.reset(weights.bias);
+                incremental_black.reset(weights.bias);
+                const std::size_t feature_count = 200;
+                for (int step = 0; step < 800; ++step) {
+                    const std::size_t index = generator() % feature_count;
+                    Features::Feature feature{index,
+                        (index % 2) ? 1 : -1,
+                        PieceColor::White};
+                    Features::Feature black_feature{index, feature.value, PieceColor::Black};
+                    const bool present = [&] {
+                        for (std::size_t i = 0; i < active.size; ++i)
+                            if (active.features[i].index == feature.index &&
+                                active.features[i].perspective == feature.perspective) return true;
+                        return false;
+                    }();
+                    if (present) {
+                        active.remove(feature);
+                        incremental.remove(feature, weights);
+                        active_black.remove(black_feature);
+                        incremental_black.remove(black_feature, weights);
+                    } else {
+                        active.add(feature);
+                        incremental.add(feature, weights);
+                        active_black.add(black_feature);
+                        incremental_black.add(black_feature, weights);
+                    }
+                    reference.reconstruct(active, weights, PieceColor::White);
+                    reference_black.reconstruct(active_black, weights, PieceColor::Black);
+                    if (incremental.data() != reference.data() ||
+                        incremental_black.data() != reference_black.data()) {
+                        std::printf("extreme: piece differential mismatch at step %d\n", step);
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        // TODO #11: cache statistics semantics across get/touch/insert/clear.
+        bool pawn_cache_stats_tests()
+        {
+            TAPA::Accumulator::PawnWeights weights;
+            TAPA::Accumulator::PawnAccumulatorCache cache(weights);
+            auto check = [&cache](bool ok, const char* what) {
+                if (ok) return true;
+                std::printf("cache_stats: %s failed (hits=%zu misses=%zu insertions=%zu)\n",
+                    what, cache.stats().hits, cache.stats().misses, cache.insertions());
+                return false;
+            };
+            const TAPA::Features::PawnStructureKey k1 = 1;
+            const TAPA::Features::PawnStructureKey k2 = 2;
+
+            // Miss via get(): misses+1, insertions+1, hits 0.
+            (void)cache.get(k1);
+            if (!check(cache.stats().hits == 0 && cache.stats().misses == 1 &&
+                cache.insertions() == 1, "get miss")) return false;
+            // Hit via get(): hits+1.
+            (void)cache.get(k1);
+            if (!check(cache.stats().hits == 1 && cache.stats().misses == 1 &&
+                cache.insertions() == 1, "get hit")) return false;
+            // Hit via touch(): hits+1, no new insertion.
+            if (!check(cache.touch(k1) != nullptr && cache.stats().hits == 2 &&
+                cache.insertions() == 1, "touch hit")) return false;
+            // Miss via touch(): misses+1, no insertion (the incremental path
+            // inserts explicitly afterwards).
+            if (!check(cache.touch(k2) == nullptr && cache.stats().hits == 2 &&
+                cache.stats().misses == 2 && cache.insertions() == 1, "touch miss")) return false;
+            cache.insert(k2, cache.get(k1));
+            if (!check(cache.insertions() == 2 && cache.contains(k2), "insert")) return false;
+            // Overwrite via insert() of an existing key counts as an insertion.
+            cache.insert(k2, cache.get(k1));
+            if (!check(cache.insertions() == 3, "insert overwrite")) return false;
+            // clear() resets everything.
+            cache.clear();
+            if (!check(cache.stats().hits == 0 && cache.stats().misses == 0 &&
+                cache.insertions() == 0 && !cache.contains(k1), "clear")) return false;
+
+            // Incremental path parity: a touch() miss must be reflected in the
+            // stats so misses covers the NNUE::apply_delta() path.
+            TAPA::Accumulator::PawnAccumulator fresh;
+            const TAPA::Features::PawnStructureKey k3 = 3;
+            if (!check(cache.touch(k3) == nullptr && cache.stats().misses == 1,
+                "post-clear touch miss")) return false;
+            cache.insert(k3, fresh);
+            (void)cache.get(k3); // hit
+            return check(cache.stats().hits == 1 && cache.stats().misses == 1 &&
+                cache.insertions() == 1, "post-insert get");
+        }
+
+        // TODO #13: checkpoint/resume determinism. Resumed N+M epochs must
+        // produce a model identical to a continuous N+M epoch run; corrupt
+        // or foreign checkpoints must be rejected with a clear message.
+        bool models_equal(const TAPA::Model::Model& a, const TAPA::Model::Model& b)
+        {
+            if (a.pawn_weights.bias != b.pawn_weights.bias) { std::printf("diff: pawn bias\n"); return false; }
+            if (a.pawn_weights.bit_weights != b.pawn_weights.bit_weights) {
+                for (std::size_t bit = 0; bit < 64; ++bit)
+                    if (a.pawn_weights.bit_weights[bit] != b.pawn_weights.bit_weights[bit]) {
+                        std::printf("diff: pawn bit %zu\n", bit);
+                        return false;
+                    }
+            }
+            if (a.piece_weights.bias != b.piece_weights.bias) { std::printf("diff: piece bias\n"); return false; }
+            if (a.piece_weights.feature_weights != b.piece_weights.feature_weights) {
+                for (std::size_t i = 0; i < a.piece_weights.feature_weights.size(); ++i)
+                    if (a.piece_weights.feature_weights[i] != b.piece_weights.feature_weights[i]) {
+                        std::printf("diff: piece feature %zu\n", i);
+                        return false;
+                    }
+            }
+            if (a.network_weights.layer1.weights != b.network_weights.layer1.weights) {
+                for (std::size_t i = 0; i < a.network_weights.layer1.weights.size(); ++i)
+                    if (a.network_weights.layer1.weights[i] != b.network_weights.layer1.weights[i]) {
+                        std::printf("diff: layer1 input %zu\n", i);
+                        return false;
+                    }
+            }
+            if (a.network_weights.layer1.bias != b.network_weights.layer1.bias) { std::printf("diff: layer1 bias\n"); return false; }
+            if (a.network_weights.layer2.weights != b.network_weights.layer2.weights) {
+                for (std::size_t i = 0; i < a.network_weights.layer2.weights.size(); ++i)
+                    if (a.network_weights.layer2.weights[i] != b.network_weights.layer2.weights[i]) {
+                        std::printf("diff: layer2 input %zu\n", i);
+                        return false;
+                    }
+            }
+            if (a.network_weights.layer2.bias != b.network_weights.layer2.bias) { std::printf("diff: layer2 bias\n"); return false; }
+            if (a.network_weights.output.weights != b.network_weights.output.weights) { std::printf("diff: output weights\n"); return false; }
+            if (a.network_weights.output.bias != b.network_weights.output.bias) { std::printf("diff: output bias\n"); return false; }
+            return a.network_weights.activation_limit == b.network_weights.activation_limit;
+        }
+
+        bool checkpoint_tests()
+        {
+            auto require = [](bool ok, int marker) {
+                if (!ok) std::printf("checkpoint_tests: check failed near marker %d\n", marker);
+                return ok;
+            };
+            std::vector<Training::Example> samples = {
+                {kings_only(), 0},
+                {[] { Position p = kings_only(); add(p, PieceType::Queen, PieceColor::White, 27); return p; }(), 2000},
+                {[] { Position p = kings_only(); add(p, PieceType::Queen, PieceColor::Black, 27); return p; }(), -2000},
+                {[] { Position p = kings_only();
+                      add(p, PieceType::Pawn, PieceColor::White, 12);
+                      add(p, PieceType::Pawn, PieceColor::White, 13);
+                      add(p, PieceType::Pawn, PieceColor::White, 14);
+                      add(p, PieceType::Pawn, PieceColor::White, 15);
+                      return p; }(), 1500},
+            };
+            const std::string checkpoint_path = "tapa_resume_regression_test.chk";
+            const std::string bad_checkpoint_path = "tapa_ckpt_bad.chk";
+            const std::string validation_checkpoint_path = "tapa_ckpt_validation.chk";
+            std::string error;
+
+            Training::Options first;
+            first.epochs = 150;
+            first.seed = 99;
+            first.learning_rate = 0.01f;
+            first.validation_fraction = 0.0;
+            first.checkpoint_out = checkpoint_path;
+            Model::Model resumed_model;
+            Training::Report first_report;
+            if (!require(Training::train(samples, first, resumed_model, &first_report, &error), 1)) return false;
+            if (!require(first_report.epochs_run == 150 && !first_report.resumed, 2)) return false;
+
+            Training::Options second = first;
+            second.epochs = 300;
+            second.checkpoint_out.clear();
+            second.checkpoint_in = checkpoint_path;
+            Model::Model after_resume;
+            Training::Report second_report;
+            if (!require(Training::train(samples, second, after_resume, &second_report, &error), 3)) {
+                std::printf("checkpoint_tests: resume failed: %s\n", error.c_str());
+                return false;
+            }
+            if (!require(second_report.resumed && second_report.epochs_run == 150, 4)) return false;
+
+            Training::Options continuous = first;
+            continuous.epochs = 300;
+            continuous.checkpoint_out.clear();
+            Model::Model continuous_model;
+            Training::Report continuous_report;
+            if (!require(Training::train(samples, continuous, continuous_model, &continuous_report, &error), 5)) return false;
+            if (!require(models_equal(after_resume, continuous_model), 6)) {
+                std::printf("checkpoint_tests: resumed model differs from continuous run\n");
+                std::printf("  pawn bias resumed=%d continuous=%d\n",
+                    static_cast<int>(after_resume.pawn_weights.bias),
+                    static_cast<int>(continuous_model.pawn_weights.bias));
+                std::printf("  final MAE resumed=%f continuous=%f\n",
+                    static_cast<double>(second_report.final_mae_milli),
+                    static_cast<double>(continuous_report.final_mae_milli));
+                std::printf("  initial MAE resumed=%f continuous=%f\n",
+                    static_cast<double>(second_report.initial_mae_milli),
+                    static_cast<double>(continuous_report.initial_mae_milli));
+                return false;
+            }
+
+            {
+                std::fstream checkpoint_file(checkpoint_path, std::ios::in | std::ios::out | std::ios::binary);
+                if (!checkpoint_file) return false;
+                checkpoint_file.seekg(-1, std::ios::end);
+                const int last_byte = checkpoint_file.get();
+                if (last_byte == std::char_traits<char>::eof()) return false;
+                checkpoint_file.clear();
+                checkpoint_file.seekp(-1, std::ios::end);
+                checkpoint_file.put(static_cast<char>(last_byte ^ 0x01));
+            }
+            Model::Model tampered_model;
+            if (!require(!Training::train(samples, second, tampered_model, nullptr, &error) &&
+                error.find("checksum") != std::string::npos, 14)) return false;
+
+            // Corrupt checkpoint must be rejected with a clear error.
+            {
+                std::ofstream bad(bad_checkpoint_path, std::ios::binary);
+                bad << "this is definitely not a checkpoint";
+            }
+            Training::Options corrupt = second;
+            corrupt.checkpoint_in = bad_checkpoint_path;
+            Model::Model untouched;
+            untouched.network_weights.activation_limit = 777;
+            if (!require(!Training::train(samples, corrupt, untouched, nullptr, &error) &&
+                !error.empty(), 7)) return false;
+
+            // A seeded split must preserve the exact number of selected rows,
+            // even when examples share the same target and pawn structure.
+            std::vector<Training::Example> split_samples;
+            for (int square = 0; square < 8; ++square) {
+                Position p = kings_only();
+                add(p, PieceType::Knight, PieceColor::White, square < 4 ? square : square + 1);
+                split_samples.push_back({p, 500});
+            }
+            Training::Options split_options;
+            split_options.epochs = 1;
+            split_options.seed = 123;
+            split_options.validation_fraction = 0.25;
+            Model::Model split_model;
+            Training::Report split_report;
+            if (!require(Training::train(split_samples, split_options, split_model, &split_report, &error) &&
+                split_report.training_examples == 6 && split_report.validation_examples == 2, 8)) return false;
+            Training::Report repeated_split_report;
+            if (!require(Training::train(split_samples, split_options, split_model, &repeated_split_report, &error) &&
+                repeated_split_report.training_examples == split_report.training_examples &&
+                repeated_split_report.validation_examples == split_report.validation_examples &&
+                repeated_split_report.epoch_history[0].train_mae_milli ==
+                    split_report.epoch_history[0].train_mae_milli &&
+                repeated_split_report.epoch_history[0].validation_mae_milli ==
+                    split_report.epoch_history[0].validation_mae_milli, 9)) return false;
+            Training::Report tiny_report;
+            if (!require(!Training::train({split_samples.front()}, split_options, split_model,
+                &tiny_report, &error) && error.find("too small") != std::string::npos, 10)) return false;
+
+            // With validation enabled, checkpoints preserve the final training
+            // state for continuation and the best validation state for export.
+            Training::Options validation_first;
+            validation_first.epochs = 12;
+            validation_first.seed = 101;
+            validation_first.learning_rate = 0.01f;
+            validation_first.validation_fraction = 0.25;
+            validation_first.checkpoint_out = validation_checkpoint_path;
+            Model::Model validation_first_model;
+            Training::Report validation_first_report;
+            if (!require(Training::train(samples, validation_first, validation_first_model,
+                &validation_first_report, &error) && validation_first_report.training_examples == 3 &&
+                validation_first_report.validation_examples == 1, 11)) return false;
+            Training::Options validation_resume = validation_first;
+            validation_resume.epochs = 24;
+            validation_resume.checkpoint_out.clear();
+            validation_resume.checkpoint_in = validation_checkpoint_path;
+            Model::Model validation_resumed_model;
+            Training::Report validation_resumed_report;
+            if (!require(Training::train(samples, validation_resume, validation_resumed_model,
+                &validation_resumed_report, &error) && validation_resumed_report.epochs_run == 12, 12)) {
+                std::printf("checkpoint_tests: validation resume failed: %s\n", error.c_str());
+                return false;
+            }
+            Training::Options validation_continuous = validation_first;
+            validation_continuous.epochs = 24;
+            validation_continuous.checkpoint_out.clear();
+            Model::Model validation_continuous_model;
+            if (!require(Training::train(samples, validation_continuous, validation_continuous_model,
+                nullptr, &error) && models_equal(validation_resumed_model, validation_continuous_model), 13))
+                return false;
+            std::remove(checkpoint_path.c_str());
+            std::remove(bad_checkpoint_path.c_str());
+            std::remove(validation_checkpoint_path.c_str());
             return true;
         }
 
@@ -998,6 +1499,9 @@ namespace TAPA::Tests
         const bool piece_ok = piece_accumulator_tests();
         const bool move_ok = move_tests();
         const bool memory_ok = memory_layout_tests();
+        const bool extreme_ok = extreme_accumulator_tests();
+        const bool cache_stats_ok = pawn_cache_stats_tests();
+        const bool checkpoint_ok = checkpoint_tests();
         if (!features_ok)
             std::printf("feature tests failed\n");
         if (!accumulator_ok)
@@ -1024,8 +1528,15 @@ namespace TAPA::Tests
             std::printf("move tests failed\n");
         if (!memory_ok)
             std::printf("memory layout tests failed\n");
+        if (!extreme_ok)
+            std::printf("extreme accumulator tests failed\n");
+        if (!cache_stats_ok)
+            std::printf("pawn cache stats tests failed\n");
+        if (!checkpoint_ok)
+            std::printf("checkpoint tests failed\n");
         return features_ok && accumulator_ok && nnue_ok && pawn_ok && model_ok && differential_ok &&
-               training_ok && move_delta_ok && random_sequences_ok && random_keys_ok && piece_ok && move_ok && memory_ok;
+               training_ok && move_delta_ok && random_sequences_ok && random_keys_ok && piece_ok && move_ok &&
+               memory_ok && extreme_ok && cache_stats_ok && checkpoint_ok;
     }
 }
 

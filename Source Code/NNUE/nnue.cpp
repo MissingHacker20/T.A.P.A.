@@ -75,13 +75,16 @@ std::size_t NNUE::worker_state_bytes() const noexcept {
     return sizeof(current_state_) + sizeof(State) * HistoryCapacity + pawn_cache_bytes();
 }
 
+// Logical weight-table size estimate, independent of any loaded model.
 std::size_t NNUE::weights_bytes() noexcept {
     return sizeof(NNUEModel) + sizeof(std::array<TAPA::Accumulator::PieceWeight, TAPA::Accumulator::NeuronCount>) *
         TAPA::Accumulator::PieceFeatureCount;
 }
 
+// Count the model allocation only when this NNUE is its sole owner. Shared
+// workers report zero here; count model_bytes() once for their common model.
 std::size_t NNUE::owned_weight_bytes() const noexcept {
-    return model_ ? weights_bytes() : 0;
+    return model_ && model_.use_count() == 1 ? model_bytes(*model_) : 0;
 }
 
 std::size_t NNUE::model_bytes(const NNUEModel& model) noexcept {

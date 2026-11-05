@@ -99,19 +99,9 @@ public:
                          const TAPA::Accumulator::Accumulator& acc_black) const noexcept;
     int32_t forward_pass(const std::array<std::int32_t, AccumulatorNeuronCount>& white,
                          const std::array<std::int32_t, AccumulatorNeuronCount>& black) const noexcept;
-    template<typename Value, typename = std::enable_if_t<
-        std::is_same_v<Value, TAPA::Accumulator::AccumulatorValue> &&
-        !std::is_same_v<Value, std::int32_t>>>
-    int32_t forward_pass(const std::array<Value, AccumulatorNeuronCount>& white,
-                         const std::array<Value, AccumulatorNeuronCount>& black) const noexcept {
-        std::array<std::int32_t, AccumulatorNeuronCount> white_input{};
-        std::array<std::int32_t, AccumulatorNeuronCount> black_input{};
-        for (std::size_t i = 0; i < AccumulatorNeuronCount; ++i) {
-            white_input[i] = static_cast<std::int32_t>(white[i]);
-            black_input[i] = static_cast<std::int32_t>(black[i]);
-        }
-        return forward_pass(white_input, black_input);
-    }
+    // NOTE: AccumulatorValue is an alias for int32_t; the int32_t array overload above is the only
+    // array-based forward_pass. A previous template overload keyed on AccumulatorValue was
+    // unreachable (it required Value == AccumulatorValue && Value != int32_t) and was removed.
     void load_weights(const NetworkWeights& weights) noexcept;
     std::int32_t activation_limit_value() const noexcept { return activation_limit; }
     std::int32_t output_scale_value() const noexcept { return output_scale; }

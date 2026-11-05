@@ -74,7 +74,8 @@ bool position_from_bitboards(const PieceBitboards& bitboards, Position& output) 
 
 inline bool operator==(const Position& lhs, const Position& rhs) noexcept {
     if (lhs.num_pieces != rhs.num_pieces) return false;
-    for (std::size_t i = 0; i < lhs.num_pieces; ++i) {
+    const std::size_t count = lhs.num_pieces <= std::size(lhs.pieces) ? lhs.num_pieces : std::size(lhs.pieces);
+    for (std::size_t i = 0; i < count; ++i) {
         if (lhs.pieces[i].type != rhs.pieces[i].type ||
             lhs.pieces[i].color != rhs.pieces[i].color ||
             lhs.pieces[i].square != rhs.pieces[i].square) return false;

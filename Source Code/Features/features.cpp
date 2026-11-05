@@ -7,7 +7,8 @@ namespace TAPA {
 namespace Features {
 
 int Position::king_square(PieceColor color) const {
-    for (std::size_t i = 0; i < num_pieces; ++i) {
+    const std::size_t count = num_pieces <= std::size(pieces) ? num_pieces : std::size(pieces);
+    for (std::size_t i = 0; i < count; ++i) {
         if (pieces[i].color == color && pieces[i].type == PieceType::King) {
             return pieces[i].square;
         }
@@ -36,6 +37,9 @@ bool Position::is_valid() const noexcept {
 }
 
 bool Position::is_feature_compatible() const noexcept {
+    // A position with more pieces than representable slots cannot be encoded
+    // safely; reject it instead of reading past the end of pieces[].
+    if (num_pieces > std::size(pieces)) return false;
     bool kings[PieceColors] = {false, false};
     for (std::size_t i = 0; i < num_pieces; ++i) {
         const Piece& piece = pieces[i];

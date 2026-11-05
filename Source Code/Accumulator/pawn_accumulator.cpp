@@ -70,6 +70,7 @@ namespace TAPA::Accumulator
                 ++stats_.hits;
                 return &entry.accumulator;
             }
+        ++stats_.misses; // touch() misses must be reflected in the stats too
         return nullptr;
     }
 
@@ -101,6 +102,7 @@ namespace TAPA::Accumulator
         replacement->age = clock_;
         replacement->valid = true;
         ++stats_.misses;
+        ++insertions_; // get() creates an entry on a miss
         return replacement->accumulator;
     }
 

@@ -17,6 +17,13 @@ constexpr std::size_t NeuronCount = 256;
 using AccumulatorValue = std::int32_t;
 
 struct Accumulator {
+    // DEPRECATED / legacy path: unlike PawnAccumulator and PieceKingAccumulator,
+    // which keep exact int64_t sums and saturate only when handing data to the
+    // network, this legacy accumulator saturates to int32_t after EVERY
+    // add/remove operation. Cancellation is therefore not preserved across a
+    // sequence of updates. NNUE::evaluate() does NOT use this type; it is kept
+    // only for small helper tests and legacy callers. For production NNUE state
+    // use PawnAccumulator / PieceKingAccumulator.
     std::array<AccumulatorValue, NeuronCount> data{};
     AccumulatorValue bias = 0;
 
